@@ -1,0 +1,319 @@
+//@version=6
+strategy("Daybreak 5M v2 - Improved",
+         shorttitle="Daybreak 5M v2",
+         overlay=true,
+         initial_capital=10000,
+         default_qty_type=strategy.percent_of_equity,
+         default_qty_value=15,
+         commission_type=strategy.commission.percent,
+         commission_value=0.1,
+         slippage=3,
+         pyramiding=0,
+         calc_on_every_tick=false,
+         calc_on_order_fills=false)
+
+// ==================================================================================
+// IMPROVED 5-MINUTE STRATEGY - SIMPLIFIED & REFINED
+// ==================================================================================
+// Fixed major issues from v1:
+// - Added STRONG trend filter (ADX > 30)
+// - Market regime detection (avoid ranging)
+// - Reduced false signals with stricter confirmations
+// - Better entry timing (pullbacks in trends)
+// - Improved risk/reward (wider stops, better targets)
+// ==================================================================================
+
+// ==================================================================================
+// INPUTS
+// ==================================================================================
+// Strategy Settings
+int minADX = input.int(25, "Minimum ADX (Trend Strength)", minval=20, maxval=40, group="Filters")
+bool requireHTF = input.bool(true, "Require Higher Timeframe Trend", group="Filters")
+int minConfidence = input.int(70, "Minimum Confidence Score", minval=60, maxval=90, group="Filters")
+bool avoidChop = input.bool(true, "Avoid Choppy Markets", group="Filters")
+
+// Risk Management
+float stopLossATR = input.float(2.5, "Stop Loss (ATR Multiplier)", minval=1.5, maxval=4.0, step=0.5, group="Risk")
+float takeProfitATR = input.float(4.0, "Take Profit (ATR Multiplier)", minval=2.0, maxval=8.0, step=0.5, group="Risk")
+bool useBreakeven = input.bool(true, "Move to Breakeven at 1.5:1", group="Risk")
+bool useTrailing = input.bool(true, "Use Trailing Stop", group="Risk")
+
+// Timeframes
+string tf15m = input.timeframe("15", "15-Minute Timeframe", group="Multi-Timeframe")
+string tf1h = input.timeframe("60", "1-Hour Timeframe", group="Multi-Timeframe")
+
+// ==================================================================================
+// CORE INDICATORS (SIMPLIFIED)
+// ==================================================================================
+
+// EMAs - Core Trend
+ema21 = ta.ema(close, 21)
+ema50 = ta.ema(close, 50)
+ema100 = ta.ema(close, 100)
+ema200 = ta.ema(close, 200)
+
+// Fast EMAs for entry timing
+ema8 = ta.ema(close, 8)
+ema13 = ta.ema(close, 13)
+
+// MACD - Optimized for 5min
+[macdLine, macdSignal, macdHist] = ta.macd(close, 8, 21, 5)
+
+// RSI
+rsi = ta.rsi(close, 14)
+
+// ADX - Trend Strength (CRITICAL FILTER)
+[plusDI, minusDI, adx] = ta.dmi(14, 14)
+
+// ATR for dynamic stops
+atr = ta.atr(14)
+
+// Volume
+volMA = ta.sma(volume, 20)
+
+// VWAP
+vwap = ta.vwap(hlc3)
+
+// Bollinger Bands
+[bbMiddle, bbUpper, bbLower] = ta.bb(close, 20, 2.0)
+
+// OBV
+obv = ta.obv
+
+// ==================================================================================
+// MARKET REGIME DETECTION (CRITICAL NEW FEATURE)
+// ==================================================================================
+
+// Trend Detection
+bool strongUptrend = close > ema21 and ema21 > ema50 and ema50 > ema100
+bool uptrend = close > ema50 and ema21 > ema50
+bool ranging = not strongUptrend and not uptrend
+
+// Trend Strength
+bool trendingMarket = adx > minADX
+bool veryStrongTrend = adx > 35
+
+// Volatility Check
+atrMA = ta.sma(atr, 20)
+bool normalVolatility = atr > atrMA * 0.8 and atr < atrMA * 2.0
+bool highVolatility = atr > atrMA * 1.5
+
+// Market Condition
+bool goodMarket = trendingMarket and strongUptrend and normalVolatility
+bool choppy = adx < 20 or ranging
+
+// ==================================================================================
+// MULTI-TIMEFRAME CONFIRMATION
+// ==================================================================================
+
+// Helper for MTF
+getEMA(src, len) => ta.ema(src, len)
+
+// 15-Minute
+tf15_close = request.security(syminfo.tickerid, tf15m, close, lookahead=barmerge.lookahead_off)
+tf15_ema50 = request.security(syminfo.tickerid, tf15m, getEMA(close, 50), lookahead=barmerge.lookahead_off)
+tf15_ema100 = request.security(syminfo.tickerid, tf15m, getEMA(close, 100), lookahead=barmerge.lookahead_off)
+tf15_adx = request.security(syminfo.tickerid, tf15m, ta.dmi(14, 14)[2], lookahead=barmerge.lookahead_off)
+
+tf15Bullish = tf15_close > tf15_ema50 and tf15_ema50 > tf15_ema100
+tf15Trending = tf15_adx > 25
+
+// 1-Hour
+tf1h_close = request.security(syminfo.tickerid, tf1h, close, lookahead=barmerge.lookahead_off)
+tf1h_ema50 = request.security(syminfo.tickerid, tf1h, getEMA(close, 50), lookahead=barmerge.lookahead_off)
+tf1h_ema100 = request.security(syminfo.tickerid, tf1h, getEMA(close, 100), lookahead=barmerge.lookahead_off)
+
+tf1hBullish = tf1h_close > tf1h_ema50
+tf1hStrong = tf1h_close > tf1h_ema50 and tf1h_ema50 > tf1h_ema100
+
+// MTF Alignment
+mtfAligned = tf15Bullish and tf1hBullish
+mtfStrong = tf15Bullish and tf15Trending and tf1hStrong
+
+// ==================================================================================
+// ENTRY LOGIC - PULLBACK IN TREND
+// ==================================================================================
+
+// Core Trend Requirements
+bool trendOK = strongUptrend and trendingMarket
+bool htfOK = requireHTF ? mtfAligned : true
+
+// Pullback Setup (key improvement - don't chase)
+bool pullback = close < ema21 and close > ema50 // Pullback to support
+bool bouncing = close > open and low < ema21 // Bouncing off EMA21
+bool deepPullback = low <= bbLower * 1.01 and close > bbLower // Touch lower BB
+
+// Momentum Confirmation
+bool macdBullish = macdLine > macdSignal and macdHist > 0
+bool macdCross = ta.crossover(macdLine, macdSignal)
+bool macdRising = macdHist > macdHist[1]
+
+bool rsiOK = rsi > 40 and rsi < 70 // Not overbought, not too weak
+bool rsiRising = rsi > rsi[1]
+
+// Volume Confirmation
+bool goodVolume = volume > volMA * 1.2
+bool volumeSpike = volume > volMA * 1.8
+
+// VWAP Confirmation
+bool aboveVWAP = close > vwap
+bool vwapReclaim = ta.crossover(close, vwap)
+
+// Price Action
+bool bullishCandle = close > open
+bool strongCandle = (close - open) / open > 0.003
+bool greenCandles = close > open and close[1] > open[1]
+
+// OBV Confirmation
+obvMA = ta.sma(obv, 20)
+bool obvBullish = obv > obvMA
+
+// ==================================================================================
+// SCORING SYSTEM (SIMPLIFIED)
+// ==================================================================================
+
+int score = 0
+
+// Trend (40 points max)
+score := score + (strongUptrend ? 15 : 0)
+score := score + (trendingMarket ? 10 : 0)
+score := score + (veryStrongTrend ? 5 : 0)
+score := score + (mtfAligned ? 10 : 0)
+
+// Entry Setup (30 points max)
+score := score + (pullback or deepPullback ? 10 : 0)
+score := score + (bouncing ? 10 : 0)
+score := score + (macdCross ? 5 : 0)
+score := score + (macdBullish ? 5 : 0)
+
+// Confirmation (30 points max)
+score := score + (rsiOK and rsiRising ? 8 : 0)
+score := score + (goodVolume ? 7 : 0)
+score := score + (aboveVWAP ? 5 : 0)
+score := score + (obvBullish ? 5 : 0)
+score := score + (greenCandles ? 5 : 0)
+
+confidenceScore = math.min(score, 100)
+
+// ==================================================================================
+// ENTRY CONDITIONS
+// ==================================================================================
+
+// Must Have (Core)
+bool coreSetup = trendOK and htfOK and not choppy
+
+// High Probability Entry (one of these)
+bool entry1 = deepPullback and macdCross and goodVolume // BB lower touch + MACD cross
+bool entry2 = pullback and bouncing and macdBullish and volumeSpike // Pullback bounce
+bool entry3 = vwapReclaim and macdCross and strongCandle and trendingMarket // VWAP reclaim
+
+bool entrySignal = entry1 or entry2 or entry3
+
+// Final Buy Signal
+bool buySetup = coreSetup and entrySignal and confidenceScore >= minConfidence
+bool noPosition = strategy.position_size == 0
+
+buySignal = buySetup and noPosition and not choppy
+
+// ==================================================================================
+// EXIT CONDITIONS
+// ==================================================================================
+
+// Trend Breakdown
+bool trendBreak = close < ema50
+bool weakening = close < ema21 and ema8 < ema13
+
+// Momentum Reversal
+bool macdBearish = ta.crossunder(macdLine, macdSignal)
+bool rsiOverbought = rsi > 75
+bool momentumLoss = macdHist < macdHist[1] and macdHist[1] < macdHist[2]
+
+// Volume Dump
+bool bearishVolume = volume > volMA * 1.5 and close < open
+
+// Signal Exit
+bool hasPosition = strategy.position_size > 0
+sellSignal = (macdBearish or (weakening and rsiOverbought) or (trendBreak and bearishVolume)) and hasPosition
+
+// ==================================================================================
+// POSITION MANAGEMENT - IMPROVED
+// ==================================================================================
+
+var float entryPrice = na
+var float stopLoss = na
+var float takeProfit = na
+var bool movedToBreakeven = false
+
+if buySignal
+    entryPrice := close
+    stopLoss := close - (atr * stopLossATR) // ATR-based stop (more dynamic)
+    takeProfit := close + (atr * takeProfitATR)
+    movedToBreakeven := false
+    strategy.entry("Long", strategy.long, comment="BUY-" + str.tostring(confidenceScore))
+
+if strategy.position_size > 0
+    // Move to breakeven at 1.5:1
+    profitDist = close - entryPrice
+    targetDist = takeProfit - entryPrice
+
+    if useBreakeven and not movedToBreakeven and profitDist >= targetDist * 0.5
+        stopLoss := entryPrice * 1.0001 // Breakeven + tiny profit
+        movedToBreakeven := true
+
+    // Exit conditions
+    if useTrailing and movedToBreakeven
+        // Trail after breakeven
+        trailStop = close - (atr * 1.5)
+        if trailStop > stopLoss
+            stopLoss := trailStop
+
+    // Stop Loss
+    strategy.exit("Stop", "Long", stop=stopLoss, limit=takeProfit)
+
+    // Signal Exit
+    if sellSignal
+        strategy.close("Long", comment="Exit Signal")
+
+// ==================================================================================
+// VISUALIZATION
+// ==================================================================================
+
+// EMAs
+plot(ema21, "EMA 21", color=color.new(color.blue, 0), linewidth=2)
+plot(ema50, "EMA 50", color=color.new(color.orange, 0), linewidth=2)
+plot(ema100, "EMA 100", color=color.new(color.red, 0), linewidth=1)
+
+// VWAP
+plot(vwap, "VWAP", color=color.new(color.purple, 40), linewidth=1, style=plot.style_circles)
+
+// Bollinger Bands
+p1 = plot(bbUpper, "BB Upper", color=color.new(color.gray, 70))
+p2 = plot(bbLower, "BB Lower", color=color.new(color.gray, 70))
+fill(p1, p2, color=color.new(color.gray, 95))
+
+// Signals
+plotshape(buySignal, "BUY", shape.triangleup, location.belowbar,
+         color.new(color.green, 0), size=size.normal)
+plotshape(sellSignal, "SELL", shape.triangledown, location.abovebar,
+         color.new(color.red, 0), size=size.small)
+
+// Market Regime Background
+bgcolor(goodMarket ? color.new(color.green, 95) : na, title="Good Market")
+bgcolor(choppy and avoidChop ? color.new(color.red, 97) : na, title="Choppy Market")
+bgcolor(confidenceScore >= 80 ? color.new(color.aqua, 97) : na, title="High Confidence")
+
+// Entry Labels
+if buySignal
+    label.new(bar_index, low * 0.997,
+             text="⬆" + str.tostring(confidenceScore) + " ADX:" + str.tostring(math.round(adx)),
+             color=color.new(color.green, 0),
+             textcolor=color.white,
+             style=label.style_label_up,
+             size=size.small)
+
+// ==================================================================================
+// ALERTS
+// ==================================================================================
+alertcondition(buySignal, "Buy Signal", "BUY - Confidence: {{plot_0}}")
+alertcondition(sellSignal, "Sell Signal", "SELL Signal")
+alertcondition(choppy, "Choppy Market Warning", "Market is choppy - avoid trading")
