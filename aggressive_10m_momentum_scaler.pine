@@ -1,0 +1,539 @@
+//@version=6
+strategy("Aggressive 10M Momentum Scaler",
+         shorttitle="10M Scaler",
+         overlay=true,
+         initial_capital=10000,
+         default_qty_type=strategy.percent_of_equity,
+         default_qty_value=100,  // Will be calculated dynamically
+         commission_type=strategy.commission.percent,
+         commission_value=0.075,  // Binance VIP 0 with BNB discount
+         slippage=2,
+         pyramiding=0,
+         calc_on_every_tick=false,
+         calc_on_order_fills=false,
+         process_orders_on_close=true)
+
+// ==================================================================================
+// AGGRESSIVE 10-MINUTE MOMENTUM SCALER
+// ==================================================================================
+// Target: 500% in 90 days through compounded wins (5-10 trades/week)
+// Philosophy: High-frequency momentum scalping with tight risk management
+// Timeframe: 10-minute primary, with 15m/30m confirmation
+// ==================================================================================
+// ⚠️ WARNING: This is an AGGRESSIVE strategy designed for EDUCATIONAL purposes
+// Real trading involves significant risk. Past performance ≠ future results.
+// Always use proper risk management and never risk more than you can afford to lose.
+// ==================================================================================
+
+// ==================================================================================
+// INPUT PARAMETERS - FULLY CONFIGURABLE
+// ==================================================================================
+
+// === MOMENTUM INDICATORS ===
+string momentumSource = input.string("Multi-Signal", "Entry Signal Source",
+     options=["Multi-Signal", "EMA Cross", "MACD", "RSI+EMA"],
+     group="📊 Momentum", tooltip="Multi-Signal combines all indicators")
+
+// EMA Settings
+int emaFast = input.int(8, "Fast EMA", minval=3, maxval=21, group="📊 Momentum")
+int emaSlow = input.int(21, "Slow EMA", minval=8, maxval=50, group="📊 Momentum")
+int emaTrend = input.int(50, "Trend EMA", minval=20, maxval=200, group="📊 Momentum")
+int emaLongTrend = input.int(200, "Long-Term Trend EMA", minval=100, maxval=500, group="📊 Momentum")
+
+// MACD Settings
+int macdFast = input.int(12, "MACD Fast", minval=8, maxval=20, group="📊 Momentum")
+int macdSlow = input.int(26, "MACD Slow", minval=20, maxval=40, group="📊 Momentum")
+int macdSignal = input.int(9, "MACD Signal", minval=5, maxval=15, group="📊 Momentum")
+
+// RSI Settings
+int rsiPeriod = input.int(14, "RSI Period", minval=7, maxval=21, group="📊 Momentum")
+int rsiOverbought = input.int(70, "RSI Overbought", minval=65, maxval=80, group="📊 Momentum")
+int rsiOversold = input.int(30, "RSI Oversold", minval=20, maxval=35, group="📊 Momentum")
+
+// === VOLUME CONFIRMATION ===
+bool useVolume = input.bool(true, "Require Volume Confirmation", group="📈 Volume")
+float volumeMultiplier = input.float(1.5, "Volume Spike Multiplier", minval=1.0, maxval=3.0, step=0.1, group="📈 Volume")
+int volumePeriod = input.int(20, "Volume MA Period", minval=10, maxval=50, group="📈 Volume")
+
+// === HIGHER TIMEFRAME CONFIRMATION ===
+bool useHTF = input.bool(true, "Use Higher Timeframe Filter", group="⏰ Multi-Timeframe")
+string htfTimeframe = input.string("15", "Higher Timeframe",
+     options=["15", "30", "60"], group="⏰ Multi-Timeframe",
+     tooltip="Confirm trend on higher timeframe")
+bool strictHTF = input.bool(false, "Strict HTF (Require Strong Trend)", group="⏰ Multi-Timeframe")
+
+// === RISK MANAGEMENT ===
+float riskPercent = input.float(1.0, "Risk Per Trade (%)", minval=0.5, maxval=2.0, step=0.1, group="⚠️ Risk Management",
+     tooltip="Percentage of account to risk per trade")
+float stopATRMultiplier = input.float(1.5, "Stop Loss (ATR Multiplier)", minval=1.0, maxval=3.0, step=0.25, group="⚠️ Risk Management")
+float tp1ATRMultiplier = input.float(2.0, "Take Profit 1 (ATR Multiplier)", minval=1.5, maxval=4.0, step=0.25, group="⚠️ Risk Management")
+float tp2ATRMultiplier = input.float(3.5, "Take Profit 2 (ATR Multiplier)", minval=2.5, maxval=6.0, step=0.25, group="⚠️ Risk Management")
+float tp3ATRMultiplier = input.float(5.0, "Take Profit 3 (ATR Multiplier)", minval=4.0, maxval=10.0, step=0.5, group="⚠️ Risk Management")
+
+// === TRAILING STOP ===
+bool useTrailing = input.bool(true, "Use Trailing Stop", group="⚠️ Risk Management")
+float trailTrigger = input.float(1.5, "Trail Trigger (R:R)", minval=1.0, maxval=3.0, step=0.25, group="⚠️ Risk Management",
+     tooltip="Start trailing after this R:R ratio")
+float trailOffset = input.float(1.0, "Trail Offset (ATR)", minval=0.5, maxval=2.0, step=0.25, group="⚠️ Risk Management")
+
+// === ADVANCED FILTERS ===
+bool useTrendFilter = input.bool(true, "Only Trade With Trend", group="🔍 Filters")
+int minADX = input.int(20, "Minimum ADX (Trend Strength)", minval=15, maxval=40, group="🔍 Filters")
+bool useVolatilityFilter = input.bool(true, "Filter High Volatility", group="🔍 Filters",
+     tooltip="Avoid trading during extreme volatility spikes")
+float maxVolatility = input.float(3.0, "Max ATR/Price %", minval=1.5, maxval=5.0, step=0.25, group="🔍 Filters")
+
+// === TRADE MANAGEMENT ===
+int maxDailyTrades = input.int(5, "Max Daily Trades", minval=1, maxval=10, group="🎯 Trade Management",
+     tooltip="Limit trades per day to avoid overtrading")
+bool partialTakeProfit = input.bool(true, "Use Partial Take Profits", group="🎯 Trade Management")
+float tp1Size = input.float(33, "TP1 Position Size %", minval=20, maxval=50, step=5, group="🎯 Trade Management")
+float tp2Size = input.float(33, "TP2 Position Size %", minval=20, maxval=50, step=5, group="🎯 Trade Management")
+
+// === VISUALIZATION ===
+bool showEMAs = input.bool(true, "Show EMAs", group="📊 Display")
+bool showSignals = input.bool(true, "Show Entry/Exit Signals", group="📊 Display")
+bool showStats = input.bool(true, "Show Statistics Table", group="📊 Display")
+
+// ==================================================================================
+// INDICATOR CALCULATIONS
+// ==================================================================================
+
+// === MOVING AVERAGES ===
+ema8 = ta.ema(close, emaFast)
+ema21 = ta.ema(close, emaSlow)
+ema50 = ta.ema(close, emaTrend)
+ema200 = ta.ema(close, emaLongTrend)
+
+// === MACD ===
+[macdLine, signalLine, macdHist] = ta.macd(close, macdFast, macdSlow, macdSignal)
+
+// === RSI ===
+rsi = ta.rsi(close, rsiPeriod)
+
+// === ATR (Volatility) ===
+atr = ta.atr(14)
+atrPercent = (atr / close) * 100
+
+// === ADX (Trend Strength) ===
+[plusDI, minusDI, adx] = ta.dmi(14, 14)
+
+// === VOLUME ===
+volumeMA = ta.sma(volume, volumePeriod)
+volumeSpike = volume > volumeMA * volumeMultiplier
+highVolume = volume > volumeMA * (volumeMultiplier * 0.75)
+
+// === BOLLINGER BANDS ===
+[bbMid, bbUpper, bbLower] = ta.bb(close, 20, 2.0)
+bbWidth = (bbUpper - bbLower) / bbMid
+
+// === VWAP ===
+vwap = ta.vwap(hlc3)
+
+// ==================================================================================
+// HIGHER TIMEFRAME ANALYSIS
+// ==================================================================================
+
+htfTF = htfTimeframe == "15" ? "15" : htfTimeframe == "30" ? "30" : "60"
+
+htfClose = request.security(syminfo.tickerid, htfTF, close, lookahead=barmerge.lookahead_off)
+htfEMA21 = request.security(syminfo.tickerid, htfTF, ta.ema(close, 21), lookahead=barmerge.lookahead_off)
+htfEMA50 = request.security(syminfo.tickerid, htfTF, ta.ema(close, 50), lookahead=barmerge.lookahead_off)
+htfRSI = request.security(syminfo.tickerid, htfTF, ta.rsi(close, 14), lookahead=barmerge.lookahead_off)
+
+htfBullish = htfClose > htfEMA21
+htfStrongBullish = htfClose > htfEMA21 and htfEMA21 > htfEMA50 and htfRSI > 45
+htfBearish = htfClose < htfEMA21
+htfStrongBearish = htfClose < htfEMA21 and htfEMA21 < htfEMA50 and htfRSI < 55
+
+// ==================================================================================
+// TREND ANALYSIS
+// ==================================================================================
+
+// Primary Trend
+bullishTrend = close > ema21 and ema21 > ema50
+strongBullTrend = close > ema21 and ema21 > ema50 and ema50 > ema200
+veryStrongBullTrend = close > ema8 and ema8 > ema21 and ema21 > ema50 and ema50 > ema200
+
+bearishTrend = close < ema21 and ema21 < ema50
+strongBearTrend = close < ema21 and ema21 < ema50 and ema50 < ema200
+
+// Trend Strength
+trendingMarket = adx > minADX
+strongTrend = adx > 25
+veryStrongTrend = adx > 35
+
+// ==================================================================================
+// ENTRY CONDITIONS - MULTI-SIGNAL APPROACH
+// ==================================================================================
+
+// === SIGNAL 1: EMA CROSSOVER ===
+emaCrossLong = ta.crossover(ema8, ema21) and close > ema50
+emaAlignedLong = ema8 > ema21 and ema21 > ema50 and close > ema8
+
+// === SIGNAL 2: MACD ===
+macdCrossLong = ta.crossover(macdLine, signalLine)
+macdBullish = macdLine > signalLine and macdHist > 0
+macdRising = macdHist > macdHist[1] and macdHist[1] > macdHist[2]
+
+// === SIGNAL 3: RSI ===
+rsiOversoldBounce = rsi < rsiOversold and rsi > rsi[1]
+rsiGoodZone = rsi > 45 and rsi < rsiOverbought
+rsiRising = rsi > rsi[1] and rsi[1] > rsi[2]
+
+// === SIGNAL 4: MOMENTUM CONFIRMATION ===
+bullishCandle = close > open
+strongBullCandle = (close - open) / open > 0.003  // 0.3% candle
+priceAboveVWAP = close > vwap
+priceNearSupport = low <= ema21 * 1.01 and close > ema21  // Pullback to EMA
+
+// === COMBINED ENTRY LOGIC ===
+coreSetupLong = bullishTrend and trendingMarket
+
+// Different signal combinations based on user choice
+emaCrossSignal = emaCrossLong or (emaAlignedLong and bullishCandle)
+macdSignal = (macdCrossLong or (macdBullish and macdRising)) and bullishCandle
+rsiSignal = (rsiOversoldBounce or (rsiGoodZone and rsiRising)) and bullishCandle
+multiSignal = (emaCrossLong or emaAlignedLong) and (macdBullish or macdCrossLong) and rsiGoodZone
+
+// Select signal based on user input
+entrySignal = momentumSource == "EMA Cross" ? emaCrossSignal :
+              momentumSource == "MACD" ? macdSignal :
+              momentumSource == "RSI+EMA" ? rsiSignal :
+              multiSignal  // Default: Multi-Signal
+
+// === VOLUME CONFIRMATION ===
+volumeConfirmed = useVolume ? (highVolume or volumeSpike) : true
+
+// === HIGHER TIMEFRAME FILTER ===
+htfConfirmed = not useHTF ? true :
+               strictHTF ? htfStrongBullish :
+               htfBullish
+
+// === VOLATILITY FILTER ===
+volatilityOK = not useVolatilityFilter ? true : atrPercent < maxVolatility
+
+// === TREND FILTER ===
+trendOK = not useTrendFilter ? true : (bullishTrend and trendingMarket)
+
+// === FINAL BUY CONDITION ===
+buyCondition = coreSetupLong and entrySignal and volumeConfirmed and htfConfirmed and volatilityOK and trendOK
+
+// ==================================================================================
+// EXIT CONDITIONS
+// ==================================================================================
+
+// Momentum reversal
+macdBearishCross = ta.crossunder(macdLine, signalLine)
+rsiBearish = rsi > rsiOverbought or (rsi < rsi[1] and rsi[1] < rsi[2] and rsi < 55)
+
+// Trend breakdown
+trendBreakdown = ta.crossunder(close, ema21) or ta.crossunder(ema8, ema21)
+majorTrendBreak = close < ema50
+
+// Bearish candle
+bearishCandle = close < open and (open - close) / open > 0.003
+
+// Exit signal
+exitSignal = (macdBearishCross or trendBreakdown or (rsiBearish and bearishCandle))
+
+// ==================================================================================
+// POSITION SIZING - DYNAMIC RISK MANAGEMENT
+// ==================================================================================
+
+// Calculate position size based on risk per trade
+calculatePositionSize(entryPrice, stopPrice, riskPerc) =>
+    accountBalance = strategy.equity
+    riskAmount = accountBalance * (riskPerc / 100)
+    stopDistance = math.abs(entryPrice - stopPrice)
+    positionSize = stopDistance > 0 ? (riskAmount / stopDistance) : 0
+    positionSize
+
+// ==================================================================================
+// TRADE MANAGEMENT VARIABLES
+// ==================================================================================
+
+var float entryPrice = na
+var float stopLoss = na
+var float takeProfit1 = na
+var float takeProfit2 = na
+var float takeProfit3 = na
+var bool trailActivated = false
+var int tradesThisDay = 0
+var int lastTradeDay = 0
+var int totalTrades = 0
+var int winningTrades = 0
+var float totalReturn = 0.0
+
+// Reset daily trade counter
+if dayofmonth != lastTradeDay
+    tradesThisDay := 0
+    lastTradeDay := dayofmonth
+
+// ==================================================================================
+// ENTRY EXECUTION
+// ==================================================================================
+
+noPosition = strategy.position_size == 0
+canTrade = tradesThisDay < maxDailyTrades
+
+if buyCondition and noPosition and canTrade
+    // Entry price and levels
+    entryPrice := close
+    stopLoss := close - (atr * stopATRMultiplier)
+    takeProfit1 := close + (atr * tp1ATRMultiplier)
+    takeProfit2 := close + (atr * tp2ATRMultiplier)
+    takeProfit3 := close + (atr * tp3ATRMultiplier)
+    trailActivated := false
+
+    // Calculate position size
+    posSize = calculatePositionSize(close, stopLoss, riskPercent)
+    posPercent = (posSize * close) / strategy.equity * 100
+    posPercent := math.min(posPercent, 100)  // Cap at 100%
+
+    // Update counters
+    tradesThisDay += 1
+    totalTrades += 1
+
+    // Calculate entry confidence score (0-100)
+    confScore = 0
+    confScore += veryStrongBullTrend ? 25 : strongBullTrend ? 20 : bullishTrend ? 15 : 0
+    confScore += veryStrongTrend ? 20 : strongTrend ? 15 : trendingMarket ? 10 : 0
+    confScore += volumeSpike ? 15 : highVolume ? 10 : 5
+    confScore += htfStrongBullish ? 20 : htfBullish ? 15 : 10
+    confScore += macdCrossLong ? 15 : macdBullish ? 10 : 5
+    confScore += emaCrossLong ? 15 : emaAlignedLong ? 10 : 5
+
+    // Entry comment
+    comment = "BUY #" + str.tostring(totalTrades) +
+              " | Conf:" + str.tostring(confScore) +
+              " | ADX:" + str.tostring(math.round(adx)) +
+              " | RSI:" + str.tostring(math.round(rsi))
+
+    // Execute entry
+    strategy.entry("LONG", strategy.long, comment=comment)
+
+// ==================================================================================
+// EXIT EXECUTION
+// ==================================================================================
+
+inPosition = strategy.position_size > 0
+
+if inPosition
+    // Calculate current profit and R:R ratio
+    currentProfit = close - entryPrice
+    riskAmount = entryPrice - stopLoss
+    currentRR = riskAmount > 0 ? currentProfit / riskAmount : 0
+    profitPercent = (currentProfit / entryPrice) * 100
+
+    // === TRAILING STOP ===
+    if useTrailing and not trailActivated and currentRR >= trailTrigger
+        trailActivated := true
+
+    if trailActivated
+        newStop = close - (atr * trailOffset)
+        if newStop > stopLoss
+            stopLoss := newStop
+
+    // === PARTIAL TAKE PROFITS ===
+    if partialTakeProfit
+        // TP1 - Take 33% off
+        if high >= takeProfit1 and strategy.position_size > 0
+            strategy.close("LONG", qty_percent=tp1Size, comment="TP1-" + str.tostring(math.round(profitPercent * 100) / 100) + "%")
+
+        // TP2 - Take another 33% off
+        if high >= takeProfit2 and strategy.position_size > 0
+            strategy.close("LONG", qty_percent=tp2Size, comment="TP2-" + str.tostring(math.round(profitPercent * 100) / 100) + "%")
+
+        // TP3 - Close remaining
+        if high >= takeProfit3 and strategy.position_size > 0
+            strategy.close("LONG", comment="TP3-" + str.tostring(math.round(profitPercent * 100) / 100) + "%")
+
+    // === STOP LOSS ===
+    if low <= stopLoss
+        strategy.close("LONG", comment="SL-" + str.tostring(math.round(profitPercent * 100) / 100) + "%")
+
+    // === SIGNAL EXIT ===
+    if exitSignal
+        strategy.close("LONG", comment="EXIT-" + str.tostring(math.round(profitPercent * 100) / 100) + "%")
+
+    // === EMERGENCY EXIT (Major trend reversal) ===
+    if majorTrendBreak and currentRR < 0.5
+        strategy.close("LONG", comment="EMERGENCY EXIT")
+
+// ==================================================================================
+// VISUALIZATION
+// ==================================================================================
+
+// === MOVING AVERAGES ===
+plot(showEMAs ? ema8 : na, "EMA 8", color=color.new(#00ff00, 0), linewidth=2)
+plot(showEMAs ? ema21 : na, "EMA 21", color=color.new(#0088ff, 0), linewidth=2)
+plot(showEMAs ? ema50 : na, "EMA 50", color=color.new(#ff9800, 30), linewidth=2)
+plot(showEMAs ? ema200 : na, "EMA 200", color=color.new(#ff0000, 50), linewidth=1)
+
+// === VWAP ===
+plot(vwap, "VWAP", color=color.new(#9c27b0, 60), linewidth=1, style=plot.style_circles)
+
+// === BOLLINGER BANDS ===
+p1 = plot(bbUpper, "BB Upper", color=color.new(color.gray, 80))
+p2 = plot(bbLower, "BB Lower", color=color.new(color.gray, 80))
+fill(p1, p2, color=color.new(color.gray, 95))
+
+// === ENTRY/EXIT SIGNALS ===
+plotshape(showSignals and buyCondition and noPosition, "BUY", shape.triangleup,
+         location.belowbar, color=color.new(#00ff00, 0), size=size.normal)
+plotshape(showSignals and exitSignal and inPosition, "EXIT", shape.triangledown,
+         location.abovebar, color=color.new(#ff0000, 0), size=size.small)
+
+// === BACKGROUND COLORS ===
+bgcolor(veryStrongBullTrend and veryStrongTrend ? color.new(#00ff00, 96) :
+       strongBullTrend and strongTrend ? color.new(#00ff00, 98) : na, title="Strong Trend")
+bgcolor(not trendingMarket ? color.new(#ff9800, 97) : na, title="Weak Trend")
+bgcolor(not volatilityOK ? color.new(#ff0000, 97) : na, title="High Volatility")
+
+// === ENTRY LABELS ===
+if showSignals and buyCondition and noPosition and canTrade
+    confScore = 0
+    confScore += veryStrongBullTrend ? 25 : strongBullTrend ? 20 : bullishTrend ? 15 : 0
+    confScore += veryStrongTrend ? 20 : strongTrend ? 15 : trendingMarket ? 10 : 0
+    confScore += volumeSpike ? 15 : highVolume ? 10 : 5
+    confScore += htfStrongBullish ? 20 : htfBullish ? 15 : 10
+    confScore += macdCrossLong ? 15 : macdBullish ? 10 : 5
+    confScore += emaCrossLong ? 15 : emaAlignedLong ? 10 : 5
+
+    labelColor = confScore >= 80 ? color.new(#00ff00, 0) :
+                 confScore >= 60 ? color.new(#00ff88, 0) :
+                 color.new(#0088ff, 0)
+
+    labelText = "BUY\n" +
+                "Conf: " + str.tostring(confScore) + "\n" +
+                "ADX: " + str.tostring(math.round(adx)) + "\n" +
+                "RSI: " + str.tostring(math.round(rsi))
+
+    label.new(bar_index, low * 0.997, text=labelText,
+             color=labelColor, textcolor=color.white,
+             style=label.style_label_up, size=size.small)
+
+// ==================================================================================
+// STATISTICS TABLE
+// ==================================================================================
+
+if showStats
+    var table statsTable = table.new(position.top_right, 2, 10,
+                                     bgcolor=color.new(#1a1a1a, 90),
+                                     border_width=1)
+
+    if barstate.islast
+        // Header
+        table.cell(statsTable, 0, 0, "10M SCALER",
+                  text_color=color.white, bgcolor=color.new(#0088ff, 50),
+                  text_size=size.normal)
+        table.cell(statsTable, 1, 0, "STATUS",
+                  text_color=color.white, bgcolor=color.new(#0088ff, 50))
+
+        // Trend
+        trendText = veryStrongBullTrend ? "VERY BULL" : strongBullTrend ? "BULL" :
+                    bullishTrend ? "Bullish" : "Neutral"
+        trendColor = veryStrongBullTrend ? color.new(#00ff00, 50) :
+                     strongBullTrend ? color.new(#00ff88, 50) :
+                     bullishTrend ? color.new(#0088ff, 50) : color.new(color.gray, 60)
+        table.cell(statsTable, 0, 1, "Trend", text_color=color.white)
+        table.cell(statsTable, 1, 1, trendText, text_color=color.white, bgcolor=trendColor)
+
+        // ADX
+        adxColor = adx > 35 ? color.new(#00ff00, 50) :
+                   adx > 25 ? color.new(#00ff88, 50) :
+                   adx > 20 ? color.new(#ffaa00, 50) : color.new(#ff0000, 50)
+        table.cell(statsTable, 0, 2, "ADX", text_color=color.white)
+        table.cell(statsTable, 1, 2, str.tostring(math.round(adx)),
+                  text_color=color.white, bgcolor=adxColor)
+
+        // RSI
+        rsiColor = rsi > 70 ? color.new(#ff0000, 50) :
+                   rsi > 55 ? color.new(#00ff00, 50) :
+                   rsi > 45 ? color.new(#ffaa00, 50) :
+                   rsi > 30 ? color.new(#ff0000, 50) : color.new(#ff0000, 30)
+        table.cell(statsTable, 0, 3, "RSI", text_color=color.white)
+        table.cell(statsTable, 1, 3, str.tostring(math.round(rsi)),
+                  text_color=color.white, bgcolor=rsiColor)
+
+        // HTF Trend
+        htfText = htfStrongBullish ? "STRONG" : htfBullish ? "Bull" : "Weak"
+        htfColor = htfStrongBullish ? color.new(#00ff00, 50) :
+                   htfBullish ? color.new(#00ff88, 50) : color.new(color.gray, 60)
+        table.cell(statsTable, 0, 4, htfTF + "m Trend", text_color=color.white)
+        table.cell(statsTable, 1, 4, htfText, text_color=color.white, bgcolor=htfColor)
+
+        // Volume
+        volText = volumeSpike ? "SPIKE" : highVolume ? "High" : "Normal"
+        volColor = volumeSpike ? color.new(#00ff00, 50) :
+                   highVolume ? color.new(#00ff88, 50) : color.new(color.gray, 60)
+        table.cell(statsTable, 0, 5, "Volume", text_color=color.white)
+        table.cell(statsTable, 1, 5, volText, text_color=color.white, bgcolor=volColor)
+
+        // Position
+        posText = inPosition ? "LONG" : "NONE"
+        posColor = inPosition ? color.new(#0088ff, 50) : color.new(color.gray, 70)
+        table.cell(statsTable, 0, 6, "Position", text_color=color.white)
+        table.cell(statsTable, 1, 6, posText, text_color=color.white, bgcolor=posColor)
+
+        // Trade Count
+        table.cell(statsTable, 0, 7, "Trades Today", text_color=color.white)
+        table.cell(statsTable, 1, 7, str.tostring(tradesThisDay) + "/" + str.tostring(maxDailyTrades),
+                  text_color=color.white)
+
+        // Total Trades
+        table.cell(statsTable, 0, 8, "Total Trades", text_color=color.white)
+        table.cell(statsTable, 1, 8, str.tostring(totalTrades), text_color=color.white)
+
+        // Current R:R (if in position)
+        if inPosition
+            currentProfit = close - entryPrice
+            riskAmount = entryPrice - stopLoss
+            currentRR = riskAmount > 0 ? currentProfit / riskAmount : 0
+            rrText = str.tostring(math.round(currentRR * 100) / 100) + ":1"
+            rrColor = currentRR >= 2 ? color.new(#00ff00, 50) :
+                      currentRR >= 1 ? color.new(#00ff88, 50) :
+                      currentRR >= 0 ? color.new(#ffaa00, 50) : color.new(#ff0000, 50)
+            table.cell(statsTable, 0, 9, "R:R Ratio", text_color=color.white)
+            table.cell(statsTable, 1, 9, rrText, text_color=color.white, bgcolor=rrColor)
+        else
+            table.cell(statsTable, 0, 9, "R:R Ratio", text_color=color.white)
+            table.cell(statsTable, 1, 9, "N/A", text_color=color.gray)
+
+// ==================================================================================
+// ALERTS
+// ==================================================================================
+
+alertcondition(buyCondition and noPosition, "BUY SIGNAL",
+              "BUY Signal - Entry at {{close}} | ADX: {{plot_0}} | RSI: {{plot_1}}")
+alertcondition(exitSignal and inPosition, "EXIT SIGNAL",
+              "EXIT Signal - Close at {{close}}")
+alertcondition(trailActivated, "TRAIL ACTIVATED",
+              "Trailing stop activated at {{close}}")
+alertcondition(high >= takeProfit1 and inPosition, "TAKE PROFIT 1",
+              "TP1 Hit at {{high}}")
+alertcondition(high >= takeProfit2 and inPosition, "TAKE PROFIT 2",
+              "TP2 Hit at {{high}}")
+alertcondition(high >= takeProfit3 and inPosition, "TAKE PROFIT 3",
+              "TP3 Hit at {{high}}")
+
+// ==================================================================================
+// PERFORMANCE METRICS (for optimization)
+// ==================================================================================
+
+// Track performance for backtesting analysis
+if barstate.islastconfirmedhistory
+    totalReturn := (strategy.equity - strategy.initial_capital) / strategy.initial_capital * 100
+    winRate = strategy.wintrades > 0 ? (strategy.wintrades / strategy.closedtrades) * 100 : 0
+    avgWin = strategy.wintrades > 0 ? strategy.grossprofit / strategy.wintrades : 0
+    avgLoss = strategy.losstrades > 0 ? strategy.grossloss / strategy.losstrades : 0
+    profitFactor = strategy.grossloss > 0 ? strategy.grossprofit / strategy.grossloss : 0
+
+    // Log to console (visible in Strategy Tester)
+    log.info("=== BACKTEST RESULTS ===")
+    log.info("Total Return: " + str.tostring(totalReturn) + "%")
+    log.info("Win Rate: " + str.tostring(winRate) + "%")
+    log.info("Profit Factor: " + str.tostring(profitFactor))
+    log.info("Total Trades: " + str.tostring(strategy.closedtrades))
+    log.info("========================")
