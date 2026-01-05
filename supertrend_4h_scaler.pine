@@ -241,17 +241,16 @@ if barstate.islast
 // ==================================================================================
 
 if buySignal
-    labelText = "BUY #" + str.tostring(tradeNumber) + " | ADX: " + str.tostring(math.round(adx)) + " | Target: " + str.tostring(targetMultiplier) + ":1"
-    label.new(bar_index, low * 0.995, text=labelText, color=color.new(color.green, 0), textcolor=color.white, style=label.style_label_up, size=size.normal)
+    buyText = "BUY #" + str.tostring(tradeNumber)
+    label.new(bar_index, low * 0.995, text=buyText, color=color.new(color.green, 0), textcolor=color.white, style=label.style_label_up, size=size.normal)
 
 if sellSignal and strategy.position_size > 0
-    // Calculate final R:R on exit
     finalProfit = close - entryPrice
     riskAmount = entryPrice - stopLoss
     finalRR = riskAmount > 0 ? finalProfit / riskAmount : 0
-    labelText = "EXIT | R:R: " + str.tostring(finalRR, "#.##") + ":1"
-    labelColor = finalRR > 0 ? color.new(color.blue, 0) : color.new(color.red, 0)
-    label.new(bar_index, high * 1.005, text=labelText, color=labelColor, textcolor=color.white, style=label.style_label_down, size=size.normal)
+    exitText = "EXIT"
+    exitColor = finalRR > 0 ? color.new(color.blue, 0) : color.new(color.red, 0)
+    label.new(bar_index, high * 1.005, text=exitText, color=exitColor, textcolor=color.white, style=label.style_label_down, size=size.normal)
 
 // ==================================================================================
 // ALERTS
