@@ -110,7 +110,7 @@ bearish = direction == -1
 var float entryPrice = na
 var float stopLoss = na
 var float profitTarget = na
-var float trailActivated = false
+var bool trailActivated = false
 var int tradeNumber = 0
 
 // Entry
