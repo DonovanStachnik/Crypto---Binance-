@@ -1,0 +1,523 @@
+//@version=6
+strategy("Daybreak 5M - Professional Grade",
+         shorttitle="Daybreak 5M Pro",
+         overlay=true,
+         initial_capital=10000,
+         default_qty_type=strategy.percent_of_equity,
+         default_qty_value=10,
+         commission_type=strategy.commission.percent,
+         commission_value=0.1,
+         slippage=3,
+         pyramiding=0,
+         calc_on_every_tick=false,
+         calc_on_order_fills=false)
+
+// ==================================================================================
+// PROFESSIONAL 5-MINUTE STRATEGY - QUALITY OVER QUANTITY
+// ==================================================================================
+// Multi-layered confirmation system using 50+ technical indicators
+// Goal: 55%+ win rate with strong profit factor
+// Optimized for BTC 5-minute chart
+// ==================================================================================
+
+// ==================================================================================
+// INPUT SETTINGS
+// ==================================================================================
+// Strategy Mode
+int minConfidence = input.int(60, "Minimum Confidence Score", minval=40, maxval=85, group="Strategy")
+bool requireMultiTimeframe = input.bool(true, "Require Multi-Timeframe Confirmation", group="Strategy")
+bool strictMode = input.bool(true, "Strict Mode (Higher Quality, Fewer Trades)", group="Strategy")
+
+// Risk Management
+float stopLossPct = input.float(1.8, "Stop Loss %", minval=0.5, maxval=5.0, step=0.1, group="Risk")
+float takeProfit1Pct = input.float(2.5, "Take Profit 1% (50% position)", minval=1.0, maxval=10.0, step=0.5, group="Risk")
+float takeProfit2Pct = input.float(4.5, "Take Profit 2% (30% position)", minval=2.0, maxval=15.0, step=0.5, group="Risk")
+bool useTrailingStop = input.bool(true, "Use Trailing Stop After TP1", group="Risk")
+float trailingStopPct = input.float(1.2, "Trailing Stop %", minval=0.5, maxval=3.0, step=0.1, group="Risk")
+
+// Timeframes
+string tf15m = input.timeframe("15", "15-Minute Timeframe", group="Timeframes")
+string tf1h = input.timeframe("60", "1-Hour Timeframe", group="Timeframes")
+
+// ==================================================================================
+// HELPER FUNCTIONS
+// ==================================================================================
+emaCalc(src, length) => ta.ema(src, length)
+smaCalc(src, length) => ta.sma(src, length)
+
+// Helper functions for MACD to use in request.security
+getMacdLine(src, fast, slow, signal) =>
+    [line, sig, hist] = ta.macd(src, fast, slow, signal)
+    line
+
+getMacdSignal(src, fast, slow, signal) =>
+    [line, sig, hist] = ta.macd(src, fast, slow, signal)
+    sig
+
+// ==================================================================================
+// TREND INDICATORS - Adapted for 5min
+// ==================================================================================
+// EMAs - Faster settings
+ema5 = emaCalc(close, 5)
+ema9 = emaCalc(close, 9)
+ema13 = emaCalc(close, 13)
+ema21 = emaCalc(close, 21)
+ema34 = emaCalc(close, 34)
+ema50 = emaCalc(close, 50)
+ema100 = emaCalc(close, 100)
+
+// EMA Trend Analysis
+emaTrendShort = close > ema5 and ema5 > ema9 and ema9 > ema13
+emaTrendMedium = close > ema21 and ema21 > ema34
+emaTrendLong = close > ema50 and ema50 > ema100
+emaTrendStrong = emaTrendShort and emaTrendMedium
+
+// EMA Crosses
+emaCrossShort = ta.crossover(ema5, ema13)
+emaCrossDown = ta.crossunder(ema5, ema13)
+
+// MACD - Optimized for 5min
+[macdLine, macdSignal, macdHist] = ta.macd(close, 9, 21, 7)
+macdBullish = macdLine > macdSignal and macdHist > 0
+macdBullishCross = ta.crossover(macdLine, macdSignal)
+macdBullishDivergence = macdLine > macdLine[5] and close < close[5]
+macdStrength = macdHist > macdHist[1] and macdHist[1] > macdHist[2]
+macdBearish = macdLine < macdSignal
+macdBearishCross = ta.crossunder(macdLine, macdSignal)
+
+// ADX - Trend Strength
+[plusDI, minusDI, adx] = ta.dmi(14, 14)
+adxStrong = adx > 25
+adxBullish = plusDI > minusDI and adx > 20
+adxTrending = adx > adx[1] and adx > 25
+
+// Parabolic SAR
+psar = ta.sar(0.02, 0.02, 0.2)
+psarBullish = close > psar
+psarFlip = psarBullish and not psarBullish[1]
+
+// SuperTrend
+atrPeriod = 10
+stMultiplier = 2.5
+atr = ta.atr(atrPeriod)
+stUpperBand = hl2 + (stMultiplier * atr)
+stLowerBand = hl2 - (stMultiplier * atr)
+var float supertrend = na
+var int stDirection = 1
+
+supertrend := stDirection == 1 ? stLowerBand : stUpperBand
+if close > supertrend
+    stDirection := 1
+if close < supertrend
+    stDirection := -1
+supertrend := stDirection == 1 ? stLowerBand : stUpperBand
+
+supertrendBullish = stDirection == 1
+supertrendFlip = supertrendBullish and stDirection[1] == -1
+
+// ==================================================================================
+// MOMENTUM INDICATORS
+// ==================================================================================
+// RSI - Multiple timeframes
+rsi7 = ta.rsi(close, 7)
+rsi14 = ta.rsi(close, 14)
+rsi21 = ta.rsi(close, 21)
+
+rsiOversold = rsi14 < 35
+rsiOverbought = rsi14 > 70
+rsiBullish = rsi14 > 50 and rsi14 > rsi14[1]
+rsiBounce = rsi14 < 40 and rsi14 > rsi14[1] and rsi14[1] < rsi14[2]
+rsiDivergenceBull = low < low[5] and rsi14 > rsi14[5]
+
+// Stochastic
+stochK = ta.stoch(close, high, low, 14)
+stochD = ta.sma(stochK, 3)
+stochOversold = stochK < 25
+stochOverbought = stochK > 75
+stochBullish = stochK > stochD and stochK > 20
+stochCrossUp = ta.crossover(stochK, stochD) and stochK < 30
+
+// CCI
+cci = ta.cci(close, 20)
+cciBullish = cci > 0
+cciOversold = cci < -100
+cciMomentum = cci > cci[1] and cci[1] > cci[2]
+
+// Williams %R
+williamsR = ta.wpr(14)
+williamsOversold = williamsR < -75
+williamsBullish = williamsR > -50
+
+// MFI - Money Flow
+mfi = ta.mfi(hlc3, 14)
+mfiBullish = mfi > 50
+mfiOversold = mfi < 25
+mfiStrong = mfi > 60
+
+// ROC - Rate of Change
+roc = ta.roc(close, 9)
+rocBullish = roc > 0 and roc > roc[1]
+
+// Ultimate Oscillator
+uo_l1 = 7
+uo_l2 = 14
+uo_l3 = 28
+bp = close - math.min(low, close[1])
+tr = math.max(high, close[1]) - math.min(low, close[1])
+avg1 = math.sum(bp, uo_l1) / math.sum(tr, uo_l1)
+avg2 = math.sum(bp, uo_l2) / math.sum(tr, uo_l2)
+avg3 = math.sum(bp, uo_l3) / math.sum(tr, uo_l3)
+ult = 100 * ((4 * avg1) + (2 * avg2) + avg3) / 7
+ultBullish = ult > 50
+ultOversold = ult < 30
+
+// ==================================================================================
+// VOLUME INDICATORS
+// ==================================================================================
+volumeMA20 = smaCalc(volume, 20)
+volumeMA50 = smaCalc(volume, 50)
+
+volumeHigh = volume > volumeMA20 * 1.3
+volumeSpike = volume > volumeMA20 * 1.8
+volumeMassive = volume > volumeMA20 * 2.5
+volumeTrending = volumeMA20 > volumeMA50
+
+// OBV - On Balance Volume
+obv = ta.obv
+obvMA = smaCalc(obv, 20)
+obvBullish = obv > obvMA and obv > obv[1]
+obvStrong = obv > obv[5] and obv[5] > obv[10]
+obvDivergenceBull = low < low[5] and obv > obv[5]
+
+// CMF - Chaikin Money Flow
+cmfLength = 20
+cmfMult = ((close - low) - (high - close)) / (high - low)
+cmfVol = cmfMult * volume
+cmf = ta.sma(cmfVol, cmfLength) / ta.sma(volume, cmfLength)
+cmfBullish = cmf > 0.05
+cmfStrong = cmf > 0.15
+cmfVeryStrong = cmf > 0.25
+
+// VWAP
+vwap = ta.vwap(hlc3)
+vwapBullish = close > vwap
+vwapAbove = close > vwap * 1.001
+vwapReclaim = ta.crossover(close, vwap)
+
+// A/D Line
+ad = ta.accdist
+adMA = smaCalc(ad, 20)
+adBullish = ad > adMA and ad > ad[1]
+
+// PVT - Price Volume Trend
+pvt = ta.pvt
+pvtMA = smaCalc(pvt, 20)
+pvtBullish = pvt > pvtMA
+
+// ==================================================================================
+// VOLATILITY INDICATORS
+// ==================================================================================
+// Bollinger Bands
+bbLength = 20
+bbMult = 2.0
+[bbMiddle, bbUpper, bbLower] = ta.bb(close, bbLength, bbMult)
+bbWidth = (bbUpper - bbLower) / bbMiddle
+bbSqueeze = bbWidth < bbWidth[5]
+bbExpansion = bbWidth > bbWidth[1]
+bbBullish = close > bbMiddle
+bbLowerTouch = low <= bbLower * 1.002 and close > bbLower
+bbUpperTouch = high >= bbUpper * 0.998
+
+// ATR
+atr14 = ta.atr(14)
+atrMA = smaCalc(atr14, 20)
+atrExpanding = atr14 > atrMA
+atrHigh = atr14 > atrMA * 1.2
+
+// Keltner Channels
+kcLength = 20
+kcMult = 2.0
+kcBasis = emaCalc(close, kcLength)
+kcUpper = kcBasis + kcMult * atr14
+kcLower = kcBasis - kcMult * atr14
+kcBullish = close > kcBasis
+
+// Donchian Channels
+dcLength = 20
+dcUpper = ta.highest(high, dcLength)
+dcLower = ta.lowest(low, dcLength)
+dcBasis = (dcUpper + dcLower) / 2
+dcBullish = close > dcBasis
+dcBreakout = close > dcUpper[1]
+
+// Historical Volatility
+hvLength = 20
+hvStdDev = ta.stdev(close, hvLength)
+hvHigh = hvStdDev > ta.sma(hvStdDev, 50)
+
+// ==================================================================================
+// PATTERN RECOGNITION
+// ==================================================================================
+// Support & Resistance
+lookback = 20
+resistance = ta.highest(high, lookback)
+support = ta.lowest(low, lookback)
+nearSupport = low <= support * 1.005
+nearResistance = high >= resistance * 0.995
+breakoutUp = close > resistance[1] and close[1] <= resistance[1]
+
+// Market Structure
+higherHigh = high > high[1] and high[1] > high[2]
+higherLow = low > low[1] and low[1] > low[2]
+lowerHigh = high < high[1] and high[1] < high[2]
+lowerLow = low < low[1] and low[1] < low[2]
+bullishStructure = higherHigh and higherLow
+upswing = low > low[1] and low[1] > low[2] and low[2] > low[3]
+
+// Candlestick Patterns
+bodySize = math.abs(close - open)
+upperWick = high - math.max(close, open)
+lowerWick = math.min(close, open) - low
+avgBody = smaCalc(bodySize, 14)
+
+hammer = lowerWick > bodySize * 2 and upperWick < bodySize * 0.3 and close > open
+bullishEngulfing = close > open and close[1] < open[1] and close > open[1] and open < close[1]
+piercingPattern = close[1] < open[1] and close > open and close > (open[1] + close[1]) / 2 and open < close[1]
+
+morningStar1 = close[2] < open[2]
+morningStar2 = bodySize[1] < avgBody * 0.3
+morningStar3 = close > open and close > (high[2] + low[2]) / 2
+morningStar = morningStar1 and morningStar2 and morningStar3
+
+shootingStar = upperWick > bodySize * 2 and lowerWick < bodySize * 0.3 and close < open
+bearishEngulfing = close < open and close[1] > open[1] and close < open[1] and open > close[1]
+
+eveningStar1 = close[2] > open[2]
+eveningStar2 = bodySize[1] < avgBody * 0.3
+eveningStar3 = close < open and close < (high[2] + low[2]) / 2
+eveningStar = eveningStar1 and eveningStar2 and eveningStar3
+
+bullishCandles = close > open and close[1] > open[1] and close[2] > open[2]
+strongBullCandle = (close - open) / open > 0.004
+
+// ==================================================================================
+// MULTI-TIMEFRAME ANALYSIS - FIXED
+// ==================================================================================
+// 15-Minute Timeframe
+tf15_ema21 = request.security(syminfo.tickerid, tf15m, emaCalc(close, 21), lookahead=barmerge.lookahead_off)
+tf15_ema50 = request.security(syminfo.tickerid, tf15m, emaCalc(close, 50), lookahead=barmerge.lookahead_off)
+tf15_close = request.security(syminfo.tickerid, tf15m, close, lookahead=barmerge.lookahead_off)
+tf15_rsi = request.security(syminfo.tickerid, tf15m, ta.rsi(close, 14), lookahead=barmerge.lookahead_off)
+tf15_macdLine = request.security(syminfo.tickerid, tf15m, getMacdLine(close, 12, 26, 9), lookahead=barmerge.lookahead_off)
+tf15_macdSignal = request.security(syminfo.tickerid, tf15m, getMacdSignal(close, 12, 26, 9), lookahead=barmerge.lookahead_off)
+
+tf15Bullish = tf15_close > tf15_ema21 and tf15_ema21 > tf15_ema50
+tf15RsiBullish = tf15_rsi > 45 and tf15_rsi < 75
+tf15MacdBullish = tf15_macdLine > tf15_macdSignal
+tf15Strong = tf15Bullish and tf15MacdBullish
+
+// 1-Hour Timeframe
+tf1h_ema21 = request.security(syminfo.tickerid, tf1h, emaCalc(close, 21), lookahead=barmerge.lookahead_off)
+tf1h_ema50 = request.security(syminfo.tickerid, tf1h, emaCalc(close, 50), lookahead=barmerge.lookahead_off)
+tf1h_close = request.security(syminfo.tickerid, tf1h, close, lookahead=barmerge.lookahead_off)
+tf1h_rsi = request.security(syminfo.tickerid, tf1h, ta.rsi(close, 14), lookahead=barmerge.lookahead_off)
+
+tf1hBullish = tf1h_close > tf1h_ema21
+tf1hStrong = tf1h_close > tf1h_ema50 and tf1h_ema21 > tf1h_ema50
+tf1hRsiBullish = tf1h_rsi > 40 and tf1h_rsi < 70
+
+// Multi-Timeframe Alignment
+mtfBullish = tf15Bullish and tf1hBullish
+mtfStrong = tf15Strong and tf1hStrong
+
+// ==================================================================================
+// INTELLIGENT SCORING SYSTEM
+// ==================================================================================
+// Trend Score (Max 30 points)
+int trendScore = 0
+trendScore := trendScore + (emaTrendShort ? 5 : 0)
+trendScore := trendScore + (emaTrendMedium ? 4 : 0)
+trendScore := trendScore + (emaTrendLong ? 3 : 0)
+trendScore := trendScore + (macdBullish ? 3 : 0)
+trendScore := trendScore + (macdBullishCross ? 4 : 0)
+trendScore := trendScore + (adxBullish ? 3 : 0)
+trendScore := trendScore + (adxTrending ? 2 : 0)
+trendScore := trendScore + (psarBullish ? 2 : 0)
+trendScore := trendScore + (supertrendBullish ? 4 : 0)
+
+// Momentum Score (Max 25 points)
+int momentumScore = 0
+momentumScore := momentumScore + (rsiBullish ? 3 : 0)
+momentumScore := momentumScore + (rsiBounce ? 4 : 0)
+momentumScore := momentumScore + (rsiDivergenceBull ? 3 : 0)
+momentumScore := momentumScore + (stochBullish ? 2 : 0)
+momentumScore := momentumScore + (stochCrossUp ? 3 : 0)
+momentumScore := momentumScore + (cciBullish ? 2 : 0)
+momentumScore := momentumScore + (cciMomentum ? 2 : 0)
+momentumScore := momentumScore + (mfiBullish ? 2 : 0)
+momentumScore := momentumScore + (rocBullish ? 2 : 0)
+momentumScore := momentumScore + (ultBullish ? 2 : 0)
+
+// Volume Score (Max 20 points)
+int volumeScore = 0
+volumeScore := volumeScore + (volumeHigh ? 3 : 0)
+volumeScore := volumeScore + (volumeSpike ? 4 : 0)
+volumeScore := volumeScore + (obvBullish ? 3 : 0)
+volumeScore := volumeScore + (obvStrong ? 2 : 0)
+volumeScore := volumeScore + (cmfBullish ? 3 : 0)
+volumeScore := volumeScore + (cmfStrong ? 2 : 0)
+volumeScore := volumeScore + (vwapBullish ? 2 : 0)
+volumeScore := volumeScore + (adBullish ? 1 : 0)
+
+// Volatility Score (Max 10 points)
+int volatilityScore = 0
+volatilityScore := volatilityScore + (bbBullish ? 2 : 0)
+volatilityScore := volatilityScore + (bbLowerTouch ? 3 : 0)
+volatilityScore := volatilityScore + (bbExpansion ? 2 : 0)
+volatilityScore := volatilityScore + (atrExpanding ? 2 : 0)
+volatilityScore := volatilityScore + (kcBullish ? 1 : 0)
+
+// Pattern Score (Max 15 points)
+int patternScore = 0
+patternScore := patternScore + (bullishStructure ? 4 : 0)
+patternScore := patternScore + (upswing ? 3 : 0)
+patternScore := patternScore + (breakoutUp ? 3 : 0)
+bullishPattern = hammer or bullishEngulfing or morningStar or piercingPattern
+patternScore := patternScore + (bullishPattern ? 3 : 0)
+patternScore := patternScore + (bullishCandles ? 2 : 0)
+
+// Multi-Timeframe Score (Max 10 points)
+int mtfScore = 0
+mtfScore := mtfScore + (tf15Bullish ? 3 : 0)
+mtfScore := mtfScore + (tf15Strong ? 2 : 0)
+mtfScore := mtfScore + (tf1hBullish ? 3 : 0)
+mtfScore := mtfScore + (tf1hStrong ? 2 : 0)
+
+// Total Confidence Score (0-110, capped at 100)
+int totalScore = trendScore + momentumScore + volumeScore + volatilityScore + patternScore + mtfScore
+confidenceScore = math.min(totalScore, 100)
+
+// ==================================================================================
+// ENTRY SIGNAL LOGIC
+// ==================================================================================
+// Core Requirements (Must Have)
+coreRequirements = emaTrendShort and macdBullish and volumeHigh and vwapBullish
+
+// Strong Confirmations (At least 2)
+confirmation1 = macdBullishCross and volumeSpike
+confirmation2 = supertrendFlip and adxStrong
+confirmation3 = rsiBounce and stochCrossUp
+confirmation4 = bbLowerTouch and cmfStrong
+confirmation5 = breakoutUp and obvStrong
+confirmation6 = bullishPattern and volumeSpike
+
+int confirmationCount = 0
+confirmationCount := confirmationCount + (confirmation1 ? 1 : 0)
+confirmationCount := confirmationCount + (confirmation2 ? 1 : 0)
+confirmationCount := confirmationCount + (confirmation3 ? 1 : 0)
+confirmationCount := confirmationCount + (confirmation4 ? 1 : 0)
+confirmationCount := confirmationCount + (confirmation5 ? 1 : 0)
+confirmationCount := confirmationCount + (confirmation6 ? 1 : 0)
+
+hasConfirmations = strictMode ? confirmationCount >= 2 : confirmationCount >= 1
+
+// Multi-Timeframe Check
+mtfCheck = requireMultiTimeframe ? mtfBullish : true
+
+// Final Buy Signal
+bool buyConditions = coreRequirements and hasConfirmations and mtfCheck and confidenceScore >= minConfidence
+bool noPosition = strategy.position_size == 0
+buySignal = buyConditions and noPosition
+
+// ==================================================================================
+// EXIT SIGNAL LOGIC
+// ==================================================================================
+// Bearish Signals
+bearishTrend = close < ema13 and ema13 < ema21
+bearishMacd = macdBearishCross or (macdBearish and macdHist < macdHist[1])
+bearishMomentum = rsi14 > 70 or (rsi14 < rsi14[1] and rsi14[1] < rsi14[2])
+bearishVolume = volumeSpike and close < open
+bearishPattern = shootingStar or bearishEngulfing or eveningStar
+weakening = close < ema5 or psarBullish == false
+
+bool sellConditions = bearishMacd or bearishMomentum or bearishPattern or (bearishTrend and bearishVolume)
+bool hasPosition = strategy.position_size > 0
+sellSignal = sellConditions and hasPosition
+
+// ==================================================================================
+// POSITION MANAGEMENT
+// ==================================================================================
+var float entryPrice = na
+var float stopLoss = na
+var float takeProfit1 = na
+var float takeProfit2 = na
+var bool tp1Hit = false
+
+if buySignal
+    entryPrice := close
+    stopLoss := close * (1 - stopLossPct / 100)
+    takeProfit1 := close * (1 + takeProfit1Pct / 100)
+    takeProfit2 := close * (1 + takeProfit2Pct / 100)
+    tp1Hit := false
+    strategy.entry("Long", strategy.long, comment="BUY " + str.tostring(confidenceScore))
+
+// Position exits
+if strategy.position_size > 0
+    // Take Profit 1 (50% position)
+    if not tp1Hit and high >= takeProfit1
+        strategy.close("Long", qty_percent=50, comment="TP1")
+        tp1Hit := true
+
+    // Take Profit 2 (30% of remaining)
+    if tp1Hit and high >= takeProfit2
+        strategy.close("Long", qty_percent=60, comment="TP2")
+
+    // Stop Loss
+    strategy.exit("Stop", "Long", stop=stopLoss)
+
+    // Trailing Stop (after TP1)
+    if tp1Hit and useTrailingStop
+        trailStopLevel = entryPrice * (1 + takeProfit1Pct / 100)
+        trailOffset = trailingStopPct
+        strategy.exit("Trail", "Long", trail_price=trailStopLevel, trail_offset=trailOffset)
+
+    // Signal Exit
+    if sellSignal
+        strategy.close("Long", comment="Signal Exit")
+
+// ==================================================================================
+// VISUALIZATION
+// ==================================================================================
+// Plot EMAs
+plot(ema5, "EMA 5", color=color.new(color.yellow, 0), linewidth=1)
+plot(ema13, "EMA 13", color=color.new(color.blue, 0), linewidth=1)
+plot(ema21, "EMA 21", color=color.new(color.orange, 0), linewidth=1)
+plot(ema50, "EMA 50", color=color.new(color.red, 0), linewidth=2)
+
+// Plot VWAP
+plot(vwap, "VWAP", color=color.new(color.purple, 30), linewidth=1, style=plot.style_cross)
+
+// Plot Bollinger Bands
+p1 = plot(bbUpper, "BB Upper", color=color.new(color.gray, 70))
+p2 = plot(bbLower, "BB Lower", color=color.new(color.gray, 70))
+fill(p1, p2, color=color.new(color.gray, 93))
+
+// Entry/Exit Signals
+plotshape(buySignal, "BUY", shape.triangleup, location.belowbar, color.new(color.green, 0), size=size.normal, text="BUY")
+
+plotshape(sellSignal and strategy.position_size > 0, "SELL", shape.triangledown, location.abovebar, color.new(color.red, 0), size=size.small, text="EXIT")
+
+// Background - Trend
+bgcolor(emaTrendStrong ? color.new(color.green, 97) : na)
+bgcolor(confidenceScore >= 75 ? color.new(color.aqua, 95) : na)
+
+// Confidence Score Label
+if buySignal
+    label.new(bar_index, low * 0.998, text="⬆ " + str.tostring(confidenceScore), color=confidenceScore >= 75 ? color.new(color.green, 0) : color.new(color.blue, 0), textcolor=color.white, style=label.style_label_up, size=size.small)
+
+// ==================================================================================
+// ALERTS
+// ==================================================================================
+alertcondition(buySignal, "Daybreak 5M Buy", "BUY Signal - Confidence: {{plot_0}}")
+alertcondition(sellSignal, "Daybreak 5M Sell", "SELL Signal")
+alertcondition(confidenceScore >= 80, "High Confidence Signal", "Very High Confidence: {{plot_0}}")
