@@ -1,0 +1,308 @@
+//@version=6
+strategy("Daybreak 15M - Clean & Simple",
+         shorttitle="Daybreak 15M",
+         overlay=true,
+         initial_capital=10000,
+         default_qty_type=strategy.percent_of_equity,
+         default_qty_value=15,
+         commission_type=strategy.commission.percent,
+         commission_value=0.1,
+         slippage=3,
+         pyramiding=0,
+         calc_on_every_tick=false,
+         calc_on_order_fills=false)
+
+// ==================================================================================
+// CLEAN 15-MINUTE STRATEGY - SIMPLIFIED FOR RELIABILITY
+// ==================================================================================
+// Optimized for 15-minute chart - less noise, better signals
+// Focus: Quality pullback entries in confirmed trends
+// ==================================================================================
+
+// ==================================================================================
+// INPUTS
+// ==================================================================================
+// Trend Filter
+int minADX = input.int(25, "Minimum ADX (Trend Filter)", minval=20, maxval=40, group="Trend")
+bool requireHTF = input.bool(true, "Require 1H Trend Confirmation", group="Trend")
+
+// Risk Management
+float stopATR = input.float(2.0, "Stop Loss (ATR Multiplier)", minval=1.0, maxval=4.0, step=0.5, group="Risk")
+float tp1ATR = input.float(3.0, "Take Profit 1 (ATR Multiplier)", minval=2.0, maxval=6.0, step=0.5, group="Risk")
+float tp2ATR = input.float(5.0, "Take Profit 2 (ATR Multiplier)", minval=3.0, maxval=10.0, step=0.5, group="Risk")
+
+// ==================================================================================
+// CORE INDICATORS
+// ==================================================================================
+
+// EMAs - Trend
+ema21 = ta.ema(close, 21)
+ema50 = ta.ema(close, 50)
+ema100 = ta.ema(close, 100)
+ema200 = ta.ema(close, 200)
+
+// Fast EMAs - Entry Timing
+ema8 = ta.ema(close, 8)
+ema13 = ta.ema(close, 13)
+
+// MACD
+[macdLine, macdSignal, macdHist] = ta.macd(close, 12, 26, 9)
+
+// RSI
+rsi = ta.rsi(close, 14)
+
+// ADX - Trend Strength
+[plusDI, minusDI, adx] = ta.dmi(14, 14)
+
+// ATR
+atr = ta.atr(14)
+
+// Volume
+volMA = ta.sma(volume, 20)
+
+// VWAP
+vwap = ta.vwap(hlc3)
+
+// Bollinger Bands
+[bbMid, bbUpper, bbLower] = ta.bb(close, 20, 2.0)
+
+// ==================================================================================
+// HIGHER TIMEFRAME (1 HOUR)
+// ==================================================================================
+
+// 1H Trend
+tf1h_close = request.security(syminfo.tickerid, "60", close, lookahead=barmerge.lookahead_off)
+tf1h_ema50 = request.security(syminfo.tickerid, "60", ta.ema(close, 50), lookahead=barmerge.lookahead_off)
+tf1h_ema100 = request.security(syminfo.tickerid, "60", ta.ema(close, 100), lookahead=barmerge.lookahead_off)
+
+tf1hBullish = tf1h_close > tf1h_ema50
+tf1hStrong = tf1h_close > tf1h_ema50 and tf1h_ema50 > tf1h_ema100
+
+// ==================================================================================
+// TREND ANALYSIS
+// ==================================================================================
+
+// Trend Direction
+strongUptrend = close > ema21 and ema21 > ema50 and ema50 > ema100
+uptrend = close > ema50
+aboveEMA200 = close > ema200
+
+// Trend Strength
+trendingMarket = adx > minADX
+strongTrend = adx > 30
+veryStrongTrend = adx > 35
+
+// Higher Timeframe OK
+htfOK = requireHTF ? tf1hBullish : true
+htfStrong = requireHTF ? tf1hStrong : true
+
+// Market Condition
+goodTrend = strongUptrend and trendingMarket and htfOK
+excellentTrend = strongUptrend and strongTrend and htfStrong and aboveEMA200
+
+// ==================================================================================
+// ENTRY SETUPS
+// ==================================================================================
+
+// Setup 1: Pullback to EMA21
+pullbackToEMA21 = low <= ema21 * 1.005 and close > ema21
+bouncingOffEMA21 = close > open and low < ema21 and close > ema21
+
+// Setup 2: Bollinger Band Lower Touch
+bbTouch = low <= bbLower * 1.01 and close > bbLower
+bbBounce = bbTouch and close > open
+
+// Setup 3: VWAP Reclaim
+vwapReclaim = ta.crossover(close, vwap) and close > open
+aboveVWAP = close > vwap
+
+// Pullback Setup (any of the above)
+validPullback = pullbackToEMA21 or bouncingOffEMA21 or bbBounce or vwapReclaim
+
+// ==================================================================================
+// CONFIRMATION SIGNALS
+// ==================================================================================
+
+// MACD Confirmation
+macdBullish = macdLine > macdSignal
+macdCross = ta.crossover(macdLine, macdSignal)
+macdRising = macdHist > macdHist[1] and macdHist > 0
+macdStrong = macdBullish and macdRising
+
+// RSI Confirmation
+rsiGood = rsi > 45 and rsi < 70
+rsiRising = rsi > rsi[1]
+rsiOversold = rsi < 40
+
+// Volume Confirmation
+highVolume = volume > volMA * 1.3
+volumeSpike = volume > volMA * 1.8
+
+// Price Action
+bullishCandle = close > open
+strongBullCandle = (close - open) / open > 0.005
+twoGreenCandles = close > open and close[1] > open[1]
+
+// ==================================================================================
+// ENTRY LOGIC - SIMPLE & CLEAN
+// ==================================================================================
+
+// Core Requirements
+coreSetup = goodTrend and validPullback
+
+// Strong Confirmation (need at least 2)
+conf1 = macdCross or macdStrong
+conf2 = rsiGood and rsiRising
+conf3 = highVolume or volumeSpike
+conf4 = bullishCandle and aboveVWAP
+
+confCount = (conf1 ? 1 : 0) + (conf2 ? 1 : 0) + (conf3 ? 1 : 0) + (conf4 ? 1 : 0)
+hasConfirmation = confCount >= 2
+
+// Excellent Entry (highest quality)
+excellentEntry = excellentTrend and (macdCross and volumeSpike and strongBullCandle)
+
+// Buy Signal
+buySetup = (coreSetup and hasConfirmation) or excellentEntry
+noPosition = strategy.position_size == 0
+
+buySignal = buySetup and noPosition
+
+// ==================================================================================
+// EXIT LOGIC
+// ==================================================================================
+
+// Trend Breakdown
+trendBreak = close < ema50
+weakTrend = close < ema21 and ema8 < ema13
+
+// Momentum Loss
+macdBearish = ta.crossunder(macdLine, macdSignal)
+rsiBearish = rsi > 70 or (rsi < rsi[1] and rsi[1] < rsi[2])
+
+// Exit Signal
+hasPosition = strategy.position_size > 0
+sellSignal = (macdBearish or trendBreak or (weakTrend and rsiBearish)) and hasPosition
+
+// ==================================================================================
+// POSITION MANAGEMENT
+// ==================================================================================
+
+var float entryPrice = na
+var float stopLoss = na
+var float tp1 = na
+var float tp2 = na
+var bool tp1Hit = false
+
+if buySignal
+    entryPrice := close
+    stopLoss := close - (atr * stopATR)
+    tp1 := close + (atr * tp1ATR)
+    tp2 := close + (atr * tp2ATR)
+    tp1Hit := false
+
+    // Calculate confidence for label
+    conf = excellentEntry ? 95 : (confCount * 20 + 40)
+    strategy.entry("Long", strategy.long, comment="BUY-" + str.tostring(conf))
+
+// Exit Management
+if hasPosition
+    // Take Profit 1 (50% position)
+    if not tp1Hit and high >= tp1
+        strategy.close("Long", qty_percent=50, comment="TP1")
+        tp1Hit := true
+
+    // Take Profit 2 (remaining 50%)
+    if tp1Hit and high >= tp2
+        strategy.close("Long", comment="TP2")
+
+    // Stop Loss
+    strategy.exit("Stop", "Long", stop=stopLoss)
+
+    // Signal Exit
+    if sellSignal
+        strategy.close("Long", comment="Exit")
+
+// ==================================================================================
+// VISUALIZATION
+// ==================================================================================
+
+// EMAs
+plot(ema21, "EMA 21", color=color.new(color.blue, 0), linewidth=2)
+plot(ema50, "EMA 50", color=color.new(color.orange, 0), linewidth=2)
+plot(ema100, "EMA 100", color=color.new(color.red, 30), linewidth=1)
+plot(ema200, "EMA 200", color=color.new(color.gray, 50), linewidth=1)
+
+// VWAP
+plot(vwap, "VWAP", color=color.new(color.purple, 50), linewidth=1, style=plot.style_circles)
+
+// Bollinger Bands
+p1 = plot(bbUpper, "BB Upper", color=color.new(color.gray, 70))
+p2 = plot(bbLower, "BB Lower", color=color.new(color.gray, 70))
+fill(p1, p2, color=color.new(color.gray, 95))
+
+// Entry/Exit Signals
+plotshape(buySignal, "BUY", shape.triangleup, location.belowbar,
+         color.new(color.green, 0), size=size.normal)
+plotshape(sellSignal, "SELL", shape.triangledown, location.abovebar,
+         color.new(color.red, 0), size=size.small)
+
+// Market Background
+bgcolor(excellentTrend ? color.new(color.green, 95) :
+       goodTrend ? color.new(color.green, 97) : na)
+bgcolor(adx < 20 ? color.new(color.red, 97) : na, title="Weak Trend")
+
+// Entry Label
+if buySignal
+    conf = excellentEntry ? 95 : (confCount * 20 + 40)
+    labelText = "⬆ ADX:" + str.tostring(math.round(adx)) + " Conf:" + str.tostring(conf)
+    label.new(bar_index, low * 0.998,
+             text=labelText,
+             color=excellentEntry ? color.new(color.green, 0) : color.new(color.blue, 0),
+             textcolor=color.white,
+             style=label.style_label_up,
+             size=size.small)
+
+// ==================================================================================
+// TABLE - QUICK STATUS
+// ==================================================================================
+
+var table statusTable = table.new(position.top_right, 2, 5,
+                                  bgcolor=color.new(color.black, 80),
+                                  border_width=1)
+
+if barstate.islast
+    // Header
+    table.cell(statusTable, 0, 0, "Metric", text_color=color.white, bgcolor=color.new(color.gray, 70))
+    table.cell(statusTable, 1, 0, "Value", text_color=color.white, bgcolor=color.new(color.gray, 70))
+
+    // Trend
+    trendColor = goodTrend ? color.new(color.green, 50) : color.new(color.red, 50)
+    table.cell(statusTable, 0, 1, "Trend", text_color=color.white)
+    table.cell(statusTable, 1, 1, goodTrend ? "✓ Good" : "✗ Weak",
+              text_color=color.white, bgcolor=trendColor)
+
+    // ADX
+    adxColor = adx > minADX ? color.new(color.green, 50) : color.new(color.red, 50)
+    table.cell(statusTable, 0, 2, "ADX", text_color=color.white)
+    table.cell(statusTable, 1, 2, str.tostring(math.round(adx)),
+              text_color=color.white, bgcolor=adxColor)
+
+    // 1H Trend
+    htfColor = tf1hBullish ? color.new(color.green, 50) : color.new(color.red, 50)
+    table.cell(statusTable, 0, 3, "1H Trend", text_color=color.white)
+    table.cell(statusTable, 1, 3, tf1hBullish ? "✓ Bull" : "✗ Bear",
+              text_color=color.white, bgcolor=htfColor)
+
+    // Position
+    posColor = hasPosition ? color.new(color.blue, 50) : color.new(color.gray, 70)
+    table.cell(statusTable, 0, 4, "Position", text_color=color.white)
+    table.cell(statusTable, 1, 4, hasPosition ? "LONG" : "None",
+              text_color=color.white, bgcolor=posColor)
+
+// ==================================================================================
+// ALERTS
+// ==================================================================================
+alertcondition(buySignal, "Buy Signal", "BUY - ADX: {{plot_0}}")
+alertcondition(sellSignal, "Sell Signal", "SELL Signal")
+alertcondition(excellentEntry, "Excellent Entry", "EXCELLENT BUY SETUP!")

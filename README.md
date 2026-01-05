@@ -1,4 +1,21 @@
-# Daybreak 5M - Professional Grade Trading Strategy
+# Daybreak Trading Strategy
+
+## ⚠️ IMPORTANT: Use the 15-Minute Strategy Instead
+
+**The 5-minute strategy (v1) failed with only 9% win rate.**
+
+✅ **RECOMMENDED**: Use `daybreak_15m_clean.pine` - See [README_15M.md](README_15M.md)
+
+- Cleaner signals
+- Less noise
+- Better win rate
+- Easier to manage
+
+---
+
+## Daybreak 5M - Professional Grade Trading Strategy (DEPRECATED)
+
+**⚠️ This version is deprecated. Use the 15M strategy instead.**
 
 A sophisticated multi-indicator confluence trading strategy optimized for Bitcoin 5-minute charts, designed to achieve 55%+ win rate with strong profit factor.
 
