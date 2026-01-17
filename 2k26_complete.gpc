@@ -1,31 +1,31 @@
 /*
-   ╔══════════════════════════════════════════════════════════╗
-   ║  Original Script: TheGodOfScripts                        ║
-   ║  Modified By: secretoflsrdogen                           ║
-   ║  Version: V7 - COMPLETE EDITION                          ║
-   ║  IAMGOAT                                                 ║
-   ╚══════════════════════════════════════════════════════════╝
+   ===========================================================
+   Original Script: TheGodOfScripts
+   Modified By: secretoflsrdogen
+   Version: V7 - COMPLETE EDITION
+   IAMGOAT
+   ===========================================================
 */
 /*
-✔ Auto Green
-✔ Tempo Speed (ms)
-✔ Stability Enhancer
-✔ Turbo Shots
-✔ RS Shooting
-✔ Insta Shot
-✔ Insta Speed (ms)
-✔ Insta Tempo (ms)
-✔ Remap Square
-✔ Infinite Stamina (Fixed fade issue)
-✔ Meter Dunk
-✔ Normal Passing Fixed (R1 + Square)
-✔ Auto Dribble
-✔ Defense AI (NEW!)
-✔ Save your inputs
-🏗 Coming Next
-🔜 Instant Stop
-🔜 Release Vibrator
-🔜 Instant Triggers
+- Auto Green
+- Tempo Speed (ms)
+- Stability Enhancer
+- Turbo Shots
+- RS Shooting
+- Insta Shot
+- Insta Speed (ms)
+- Insta Tempo (ms)
+- Remap Square
+- Infinite Stamina (Fixed fade issue)
+- Meter Dunk
+- Normal Passing Fixed (R1 + Square)
+- Auto Dribble
+- Defense AI (NEW!)
+- Save your inputs
+Coming Next:
+- Instant Stop
+- Release Vibrator
+- Instant Triggers
 */
 int flick_sequences_enabled = 0;
 int delay_duration = 50;
