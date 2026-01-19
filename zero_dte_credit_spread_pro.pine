@@ -80,7 +80,7 @@ var float dayHigh = na
 var float dayLow = na
 
 // Reset daily tracking
-if ta.change(time("D"))
+if ta.change(time("D")) != 0
     dayOpen := open
     dayHigh := high
     dayLow := low
@@ -370,7 +370,7 @@ canEnter = noPosition and isEntryTime and validTradingDay and not vixDangerous
 
 // Daily loss check
 var float dailyPL = 0.0
-if ta.change(time("D"))
+if ta.change(time("D")) != 0
     dailyPL := 0.0
 
 dailyLossExceeded = math.abs(dailyPL) >= maxDailyLoss
