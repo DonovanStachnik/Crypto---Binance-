@@ -328,10 +328,7 @@ bgcolor(isEntryTime and barstate.isconfirmed ? color.new(color.blue, 97) : na, t
 // Entry Labels
 if enterPutSpread or enterCallSpread
     tradeLabel = enterPutSpread ? "PUT SPREAD" : "CALL SPREAD"
-    labelText = tradeLabel + "\nShort: " + str.tostring(shortStrike) +
-                "\nPremium: $" + str.tostring(entryPremium, "#.##") +
-                "\nQuality: " + str.tostring(qualityScore) +
-                "\nVIX: " + str.tostring(vix, "#.#")
+    labelText = tradeLabel + "\nShort: " + str.tostring(shortStrike) + "\nPremium: $" + str.tostring(entryPremium, "#.##") + "\nQuality: " + str.tostring(qualityScore) + "\nVIX: " + str.tostring(vix, "#.#")
 
     label.new(bar_index, enterPutSpread ? low : high,
              text=labelText,

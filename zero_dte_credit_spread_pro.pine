@@ -580,12 +580,7 @@ if enterPutSpread or enterCallSpread
     labelColor = enterPutSpread ? color.new(color.green, 0) : color.new(color.red, 0)
     labelStyle = enterPutSpread ? label.style_label_up : label.style_label_down
 
-    labelText = (enterPutSpread ? "PUT SPREAD" : "CALL SPREAD") + "\n" +
-                "Strike: " + str.tostring(shortStrike) + "/" + str.tostring(longStrike) + "\n" +
-                "Premium: $" + str.tostring(entryPremium, "#.##") + "\n" +
-                "Contracts: " + str.tostring(positionSize, "#.#") + "\n" +
-                "Quality: " + str.tostring(qualityScore) + "\n" +
-                "Win%: " + str.tostring(winProbability * 100, "#") + "%"
+    labelText = (enterPutSpread ? "PUT SPREAD" : "CALL SPREAD") + "\n" + "Strike: " + str.tostring(shortStrike) + "/" + str.tostring(longStrike) + "\n" + "Premium: $" + str.tostring(entryPremium, "#.##") + "\n" + "Contracts: " + str.tostring(positionSize, "#.#") + "\n" + "Quality: " + str.tostring(qualityScore) + "\n" + "Win%: " + str.tostring(winProbability * 100, "#") + "%"
 
     label.new(bar_index, enterPutSpread ? low * 0.997 : high * 1.003,
              text=labelText,
