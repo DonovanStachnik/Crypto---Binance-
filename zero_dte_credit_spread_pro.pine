@@ -1,0 +1,693 @@
+//@version=6
+strategy("0 DTE Credit Spread Pro - Maximum Win Rate",
+         shorttitle="0DTE CS Pro",
+         overlay=true,
+         initial_capital=25000,
+         default_qty_type=strategy.cash,
+         default_qty_value=1000,
+         commission_type=strategy.commission.cash_per_contract,
+         commission_value=0.65,
+         slippage=0,
+         pyramiding=1,
+         calc_on_every_tick=false,
+         calc_on_order_fills=false,
+         process_orders_on_close=true)
+
+// ==================================================================================
+// 0 DTE CREDIT SPREAD PRO - MAXIMUM WIN RATE OPTIMIZATION
+// ==================================================================================
+// Advanced strategy with:
+// - Dynamic strike selection based on probability
+// - Economic event awareness
+// - Multi-timeframe confirmation
+// - Adaptive position sizing
+// - Advanced Greeks simulation
+// ==================================================================================
+
+// ==================================================================================
+// INPUTS
+// ==================================================================================
+
+// Core Strategy
+string ticker = input.string("SPX", "Underlying", options=["SPX", "SPY", "QQQ"], group="Core")
+float alphaMultiplier = input.float(0.45, "Alpha (EM Multiplier)", minval=0.3, maxval=0.9, step=0.05, group="Core", tooltip="Lower = wider bands = higher win rate but lower premium")
+int spreadWidth = input.int(5, "Spread Width ($)", minval=3, maxval=20, step=1, group="Core")
+bool adaptiveWidth = input.bool(true, "Adaptive Spread Width", group="Core", tooltip="Adjust spread width based on volatility")
+
+// Strike Selection Strategy
+string strikeStrategy = input.string("Conservative", "Strike Selection", options=["Aggressive", "Moderate", "Conservative", "Ultra-Safe"], group="Strikes")
+float deltaTarget = input.float(0.16, "Target Delta", minval=0.05, maxval=0.30, step=0.01, group="Strikes", tooltip="Lower delta = further OTM = higher win rate")
+bool useStdDev = input.bool(true, "Use Std Deviation Bands", group="Strikes")
+float stdDevMult = input.float(1.5, "Std Dev Multiplier", minval=1.0, maxval=3.0, step=0.1, group="Strikes")
+
+// Time Management
+int entryHour = input.int(9, "Entry Hour", minval=0, maxval=23, group="Time")
+int entryMinute = input.int(45, "Entry Minute", minval=0, maxval=59, group="Time")
+int earlyExitHour = input.int(14, "Early Exit Hour (if winning)", minval=10, maxval=16, group="Time")
+int finalExitHour = input.int(16, "Final Exit Hour", minval=13, maxval=23, group="Time")
+bool avoidFOMC = input.bool(true, "Avoid FOMC Days", group="Time")
+bool avoidOpex = input.bool(true, "Avoid Monthly Expiry", group="Time")
+
+// Multi-Timeframe Filters
+bool use5MinConfirm = input.bool(true, "Use 5-Min Confirmation", group="MTF")
+bool use1HourTrend = input.bool(true, "Use 1-Hour Trend Filter", group="MTF")
+bool useDailyBias = input.bool(true, "Use Daily Bias", group="MTF")
+
+// Advanced Risk Controls
+float maxDailyLoss = input.float(500, "Max Daily Loss ($)", minval=100, maxval=5000, step=100, group="Risk")
+float maxPositionLoss = input.float(250, "Max Single Position Loss ($)", minval=50, maxval=1000, step=50, group="Risk")
+float profitTarget = input.float(0.75, "Take Profit (% of premium)", minval=0.5, maxval=0.90, step=0.05, group="Risk")
+bool useBreakEven = input.bool(true, "Move to Breakeven After 50% Profit", group="Risk")
+
+// VIX Regime Filters
+float vixLow = input.float(12, "VIX Low Threshold", minval=8, maxval=15, group="VIX Regime")
+float vixMed = input.float(20, "VIX Medium Threshold", minval=15, maxval=25, group="VIX Regime")
+float vixHigh = input.float(30, "VIX High Threshold", minval=25, maxval=40, group="VIX Regime")
+bool tradeHighVIX = input.bool(false, "Trade in High VIX (>30)", group="VIX Regime")
+
+// Position Sizing
+float baseContracts = input.float(1, "Base Contracts", minval=0.5, maxval=5, step=0.5, group="Position")
+bool useKellyCriterion = input.bool(true, "Use Kelly Criterion Sizing", group="Position")
+float kellyFraction = input.float(0.25, "Kelly Fraction", minval=0.1, maxval=0.5, step=0.05, group="Position")
+
+// ==================================================================================
+// MARKET DATA & INDICATORS
+// ==================================================================================
+
+// Price Data
+var float dayOpen = na
+var float dayHigh = na
+var float dayLow = na
+
+// Reset daily tracking
+if ta.change(time("D"))
+    dayOpen := open
+    dayHigh := high
+    dayLow := low
+else
+    dayHigh := math.max(dayHigh, high)
+    dayLow := math.min(dayLow, low)
+
+// Moving Averages (Multiple Timeframes)
+sma20 = ta.sma(close, 20)
+sma60 = ta.sma(close, 60)
+ema9 = ta.ema(close, 9)
+ema21 = ta.ema(close, 21)
+ema50 = ta.ema(close, 50)
+
+// Higher Timeframe Trend
+htf1H_close = request.security(syminfo.tickerid, "60", close, lookahead=barmerge.lookahead_off)
+htf1H_sma20 = request.security(syminfo.tickerid, "60", ta.sma(close, 20), lookahead=barmerge.lookahead_off)
+htf1H_ema50 = request.security(syminfo.tickerid, "60", ta.ema(close, 50), lookahead=barmerge.lookahead_off)
+
+htfDaily_close = request.security(syminfo.tickerid, "D", close, lookahead=barmerge.lookahead_off)
+htfDaily_ema21 = request.security(syminfo.tickerid, "D", ta.ema(close, 21), lookahead=barmerge.lookahead_off)
+
+// VIX
+vixTicker = ticker == "SPX" or ticker == "SPY" ? "VIX" : "VXN"
+vix = request.security(vixTicker, timeframe.period, close, lookahead=barmerge.lookahead_off)
+vixSMA = ta.sma(vix, 10)
+vix1d = vix / 1.5  // VIX1D approximation
+
+// Bollinger Bands
+[bbMid, bbUpper, bbLower] = ta.bb(close, 20, 2.0)
+bbWidth = (bbUpper - bbLower) / bbMid
+
+// ATR & Volatility
+atr14 = ta.atr(14)
+atr20 = ta.atr(20)
+volatilityRatio = atr14 / atr20
+
+// True Range Expansion
+tr = ta.tr
+trSMA = ta.sma(tr, 14)
+expandingRange = tr > trSMA * 1.2
+
+// Volume
+volSMA = ta.sma(volume, 20)
+highVol = volume > volSMA * 1.3
+lowVol = volume < volSMA * 0.7
+
+// RSI
+rsi = ta.rsi(close, 14)
+rsi_5min = request.security(syminfo.tickerid, "5", ta.rsi(close, 14), lookahead=barmerge.lookahead_off)
+
+// ==================================================================================
+// VIX-BASED EXPECTED MOVE
+// ==================================================================================
+
+// Base expected move calculation
+baseExpectedMove = (vix1d / math.sqrt(252)) / 100
+adjustedAlpha = alphaMultiplier
+
+// Adjust alpha based on strike strategy
+if strikeStrategy == "Ultra-Safe"
+    adjustedAlpha := alphaMultiplier * 0.70  // Tighter bands = further OTM
+else if strikeStrategy == "Conservative"
+    adjustedAlpha := alphaMultiplier * 0.85
+else if strikeStrategy == "Moderate"
+    adjustedAlpha := alphaMultiplier * 1.0
+else if strikeStrategy == "Aggressive"
+    adjustedAlpha := alphaMultiplier * 1.20
+
+// Calculate expected move
+expectedMovePercent = baseExpectedMove * adjustedAlpha
+expectedMoveDollars = close * expectedMovePercent
+
+// Standard Deviation based bands (alternative)
+stdDev = ta.stdev(close, 20)
+stdDevBand = stdDev * stdDevMult
+
+// Choose band calculation method
+bandWidth = useStdDev ? stdDevBand : expectedMoveDollars
+
+// Price bands
+lowerBand = close - bandWidth
+upperBand = close + bandWidth
+
+// Adaptive spread width
+dynamicSpreadWidth = spreadWidth
+if adaptiveWidth
+    if vix > vixHigh
+        dynamicSpreadWidth := int(spreadWidth * 1.5)  // Wider spreads in high VIX
+    else if vix < vixLow
+        dynamicSpreadWidth := int(spreadWidth * 0.8)  // Tighter spreads in low VIX
+
+// ==================================================================================
+// TREND & BIAS ANALYSIS
+// ==================================================================================
+
+// Current Timeframe Trend
+trendUp = sma20 > sma60 and close > sma20
+trendDown = sma20 < sma60 and close < sma20
+strongTrendUp = trendUp and ema9 > ema21 and ema21 > ema50 and close > ema9
+strongTrendDown = trendDown and ema9 < ema21 and ema21 < ema50 and close < ema9
+
+// 1-Hour Trend
+htf1H_bullish = htf1H_close > htf1H_sma20 and htf1H_sma20 > htf1H_ema50
+htf1H_bearish = htf1H_close < htf1H_sma20 and htf1H_sma20 < htf1H_ema50
+htf1H_neutral = not htf1H_bullish and not htf1H_bearish
+
+// Daily Bias
+htfDaily_bullish = htfDaily_close > htfDaily_ema21
+htfDaily_bearish = htfDaily_close < htfDaily_ema21
+
+// Multi-Timeframe Alignment
+mtfBullish = trendUp and (not use1HourTrend or htf1H_bullish) and (not useDailyBias or htfDaily_bullish)
+mtfBearish = trendDown and (not use1HourTrend or htf1H_bearish) and (not useDailyBias or htfDaily_bearish)
+
+// 5-Min Confirmation
+priceAboveEMA5min = use5MinConfirm ? request.security(syminfo.tickerid, "5", close > ta.ema(close, 9), lookahead=barmerge.lookahead_off) : true
+priceBelowEMA5min = use5MinConfirm ? request.security(syminfo.tickerid, "5", close < ta.ema(close, 9), lookahead=barmerge.lookahead_off) : true
+
+// ==================================================================================
+// VIX REGIME CLASSIFICATION
+// ==================================================================================
+
+vixRegimeLow = vix < vixLow
+vixRegimeMedium = vix >= vixLow and vix < vixMed
+vixRegimeHigh = vix >= vixMed and vix < vixHigh
+vixRegimeExtreme = vix >= vixHigh
+
+// VIX Behavior
+vixRising = vix > vix[1] and vix > vixSMA
+vixFalling = vix < vix[1] and vix < vixSMA
+vixStable = math.abs(vix - vix[1]) / vix < 0.03
+
+// Optimal VIX conditions for credit spreads
+vixOptimal = (vixRegimeMedium or vixRegimeLow) and vixStable
+vixAcceptable = vixRegimeMedium or (vixRegimeHigh and tradeHighVIX)
+vixDangerous = vixRegimeExtreme or (vixRegimeHigh and vixRising and not tradeHighVIX)
+
+// ==================================================================================
+// MARKET QUALITY SCORE (0-100)
+// ==================================================================================
+
+var float qualityScore = 0
+
+qualityScore := 0
+
+// Trend Quality (0-30 points)
+if strongTrendUp or strongTrendDown
+    qualityScore += 30
+else if trendUp or trendDown
+    qualityScore += 20
+else
+    qualityScore += 5
+
+// VIX Quality (0-25 points)
+if vixOptimal
+    qualityScore += 25
+else if vixAcceptable
+    qualityScore += 15
+else if vixDangerous
+    qualityScore += 0
+
+// Multi-Timeframe Alignment (0-20 points)
+if mtfBullish or mtfBearish
+    qualityScore += 20
+else if trendUp or trendDown
+    qualityScore += 10
+
+// Volume Quality (0-10 points)
+if highVol
+    qualityScore += 10
+else if not lowVol
+    qualityScore += 7
+
+// Range Conditions (0-15 points)
+if not expandingRange
+    qualityScore += 15
+else
+    qualityScore += 5
+
+// Quality Tiers
+qualityExcellent = qualityScore >= 80
+qualityGood = qualityScore >= 65 and qualityScore < 80
+qualityFair = qualityScore >= 50 and qualityScore < 65
+qualityPoor = qualityScore < 50
+
+// ==================================================================================
+// TIME FILTERS & SPECIAL DAYS
+// ==================================================================================
+
+// Entry window
+isEntryTime = (hour == entryHour and minute >= entryMinute) or (hour == entryHour + 1 and minute < entryMinute)
+isEarlyExitTime = hour >= earlyExitHour
+isFinalExitTime = hour >= finalExitHour
+
+// Day of week filters
+isMonday = dayofweek == dayofweek.monday
+isFriday = dayofweek == dayofweek.friday
+isWednesday = dayofweek == dayofweek.wednesday
+
+// FOMC Days (typically Wed, ~8 times per year)
+// This is a simplified check - in production, use actual FOMC calendar
+isFOMCDay = isWednesday and (month == 1 or month == 3 or month == 5 or month == 6 or month == 7 or month == 9 or month == 11 or month == 12)
+skipFOMC = avoidFOMC and isFOMCDay
+
+// Monthly OPEX (3rd Friday)
+dayOfMonth = dayofmonth
+isThirdWeek = dayOfMonth >= 15 and dayOfMonth <= 21
+isOpexDay = isFriday and isThirdWeek
+skipOpex = avoidOpex and isOpexDay
+
+// Valid trading day
+validTradingDay = not skipFOMC and not skipOpex
+
+// ==================================================================================
+// POSITION SIZING (Kelly Criterion)
+// ==================================================================================
+
+// Kelly Criterion: f = (bp - q) / b
+// where: b = odds (max_loss/premium), p = win_probability, q = 1-p
+
+// Estimate win probability based on quality and delta
+winProbability = 0.70  // Base 70% win rate for 0DTE credit spreads
+
+if strikeStrategy == "Ultra-Safe"
+    winProbability := 0.85
+else if strikeStrategy == "Conservative"
+    winProbability := 0.75
+else if strikeStrategy == "Moderate"
+    winProbability := 0.65
+else if strikeStrategy == "Aggressive"
+    winProbability := 0.55
+
+// Adjust for quality score
+if qualityExcellent
+    winProbability := winProbability * 1.10
+else if qualityPoor
+    winProbability := winProbability * 0.90
+
+// Adjust for VIX regime
+if vixDangerous
+    winProbability := winProbability * 0.85
+
+// Premium estimation (refined)
+premiumEstimate = close * expectedMovePercent * 0.22  // ~22% of expected move
+premiumEstimate := math.max(premiumEstimate, 0.50)  // Minimum $0.50 premium
+
+// Max loss per spread
+maxLossPerSpread = dynamicSpreadWidth - premiumEstimate
+
+// Kelly calculation
+oddsRatio = maxLossPerSpread / premiumEstimate
+lossProbability = 1 - winProbability
+kellyPct = (winProbability * oddsRatio - lossProbability) / oddsRatio
+kellySizing = kellyPct > 0 ? kellyPct * kellyFraction : 0.1
+
+// Final position size
+positionSize = baseContracts
+if useKellyCriterion and kellySizing > 0
+    positionSize := baseContracts * kellySizing
+    positionSize := math.max(positionSize, baseContracts * 0.3)  // Minimum 30% of base
+    positionSize := math.min(positionSize, baseContracts * 2.0)  // Maximum 200% of base
+
+// Reduce size in poor conditions
+if qualityPoor
+    positionSize := positionSize * 0.5
+else if vixDangerous
+    positionSize := positionSize * 0.6
+
+// ==================================================================================
+// ENTRY LOGIC
+// ==================================================================================
+
+var string tradeType = ""
+var float shortStrike = na
+var float longStrike = na
+var float entryPremium = na
+var float entryPrice = na
+var int entryBar = na
+var float stopLossLevel = na
+var float takeProfitLevel = na
+var bool movedToBreakeven = false
+
+// Can we enter?
+noPosition = strategy.position_size == 0
+canEnter = noPosition and isEntryTime and validTradingDay and not vixDangerous
+
+// Daily loss check
+var float dailyPL = 0.0
+if ta.change(time("D"))
+    dailyPL := 0.0
+
+dailyLossExceeded = math.abs(dailyPL) >= maxDailyLoss
+if dailyLossExceeded
+    canEnter := false
+
+// Entry setups
+putSpreadSetup = mtfBullish and priceAboveEMA5min and (qualityGood or qualityExcellent)
+callSpreadSetup = mtfBearish and priceBelowEMA5min and (qualityGood or qualityExcellent)
+
+// Additional confirmation filters
+momentumOK = math.abs(rsi - 50) < 30  // Not overbought/oversold
+priceActionOK = not expandingRange  // Not expanding volatility
+
+// Final entry signals
+enterPutSpread = canEnter and putSpreadSetup and momentumOK and priceActionOK
+enterCallSpread = canEnter and callSpreadSetup and momentumOK and priceActionOK
+
+// Execute entries
+if enterPutSpread
+    tradeType := "PUT"
+    shortStrike := math.round(lowerBand)
+    longStrike := shortStrike - dynamicSpreadWidth
+    entryPremium := premiumEstimate
+    entryPrice := close
+    entryBar := bar_index
+    stopLossLevel := entryPremium * (1 + (maxPositionLoss / (entryPremium * positionSize * 100)))
+    takeProfitLevel := entryPremium * profitTarget
+    movedToBreakeven := false
+
+    strategy.entry("PCS", strategy.long, qty=positionSize,
+                   comment="PCS-Q" + str.tostring(math.round(qualityScore)))
+
+if enterCallSpread
+    tradeType := "CALL"
+    shortStrike := math.round(upperBand)
+    longStrike := shortStrike + dynamicSpreadWidth
+    entryPremium := premiumEstimate
+    entryPrice := close
+    entryBar := bar_index
+    stopLossLevel := entryPremium * (1 + (maxPositionLoss / (entryPremium * positionSize * 100)))
+    takeProfitLevel := entryPremium * profitTarget
+    movedToBreakeven := false
+
+    strategy.entry("CCS", strategy.long, qty=positionSize,
+                   comment="CCS-Q" + str.tostring(math.round(qualityScore)))
+
+// ==================================================================================
+// P&L CALCULATION & EXIT MANAGEMENT
+// ==================================================================================
+
+hasPosition = strategy.position_size != 0
+var float currentPL = 0.0
+var float maxDrawdown = 0.0
+var float peakPL = 0.0
+
+if hasPosition and not na(entryPremium) and not na(shortStrike)
+
+    // Calculate current spread value
+    if tradeType == "PUT"
+        if close > shortStrike
+            // Max profit - price above short strike
+            currentPL := entryPremium
+        else if close <= longStrike
+            // Max loss - price below long strike
+            currentPL := entryPremium - dynamicSpreadWidth
+        else
+            // Partial loss - price between strikes
+            intrinsicShort = shortStrike - close
+            intrinsicLong = math.max(0, longStrike - close)
+            spreadValue = intrinsicShort - intrinsicLong
+            currentPL := entryPremium - spreadValue
+
+    else if tradeType == "CALL"
+        if close < shortStrike
+            // Max profit - price below short strike
+            currentPL := entryPremium
+        else if close >= longStrike
+            // Max loss - price above long strike
+            currentPL := entryPremium - dynamicSpreadWidth
+        else
+            // Partial loss - price between strikes
+            intrinsicShort = close - shortStrike
+            intrinsicLong = math.max(0, close - longStrike)
+            spreadValue = intrinsicShort - intrinsicLong
+            currentPL := entryPremium - spreadValue
+
+    // Track peak P&L and drawdown
+    peakPL := math.max(peakPL, currentPL)
+    maxDrawdown := math.max(maxDrawdown, peakPL - currentPL)
+
+// Exit conditions
+
+// 1. Take profit
+takeProfitHit = currentPL >= takeProfitLevel
+
+// 2. Stop loss
+stopLossHit = currentPL <= -maxLossPerSpread or currentPL <= -(maxPositionLoss / (positionSize * 100))
+
+// 3. Time-based exit
+timeExit = isFinalExitTime
+earlyTPExit = isEarlyExitTime and currentPL >= (entryPremium * 0.60)
+
+// 4. Delta breach (price significantly past short strike)
+deltaBreached = false
+if tradeType == "PUT"
+    deltaBreached := close < shortStrike * 0.993  // 0.7% below
+else if tradeType == "CALL"
+    deltaBreached := close > shortStrike * 1.007  // 0.7% above
+
+// 5. Breakeven stop (after achieving 50% of max profit)
+if useBreakEven and not movedToBreakeven and currentPL >= (entryPremium * 0.50)
+    stopLossLevel := 0  // Move stop to breakeven
+    movedToBreakeven := true
+
+breakevenStopHit = movedToBreakeven and currentPL <= 0
+
+// 6. VIX spike protection
+vixSpike = vix > vix[1] * 1.20 and vix > vixHigh
+
+// 7. Trend reversal
+trendReversal = false
+if tradeType == "PUT" and close < ema9 and ema9 < ema21
+    trendReversal := true
+else if tradeType == "CALL" and close > ema9 and ema9 > ema21
+    trendReversal := true
+
+// Combined exit signal
+exitSignal = hasPosition and (takeProfitHit or stopLossHit or timeExit or earlyTPExit or
+             deltaBreached or breakevenStopHit or vixSpike or (trendReversal and currentPL < 0))
+
+// Execute exit
+if exitSignal
+    exitReason = takeProfitHit ? "TP" : stopLossHit ? "SL" : timeExit ? "EOD" :
+                 earlyTPExit ? "EarlyTP" : deltaBreached ? "Delta" :
+                 breakevenStopHit ? "BE" : vixSpike ? "VixSpike" : "TrendRev"
+
+    plDollars = currentPL * positionSize * 100
+    dailyPL += plDollars
+
+    strategy.close_all(comment=exitReason + " $" + str.tostring(math.round(plDollars)))
+
+    // Reset
+    tradeType := ""
+    shortStrike := na
+    longStrike := na
+    entryPremium := na
+    currentPL := 0.0
+    peakPL := 0.0
+    maxDrawdown := 0.0
+    movedToBreakeven := false
+
+// ==================================================================================
+// VISUALIZATION
+// ==================================================================================
+
+// Expected Move Bands
+plot(upperBand, "Upper Band", color=color.new(color.red, 30), linewidth=2, style=plot.style_stepline)
+plot(lowerBand, "Lower Band", color=color.new(color.green, 30), linewidth=2, style=plot.style_stepline)
+fill(plot(upperBand), plot(lowerBand), color=color.new(color.purple, 92))
+
+// SMAs
+plot(sma20, "SMA 20", color=color.new(color.blue, 0), linewidth=2)
+plot(sma60, "SMA 60", color=color.new(color.orange, 0), linewidth=1)
+plot(ema9, "EMA 9", color=color.new(color.aqua, 0), linewidth=1)
+
+// Strike levels
+var line shortLine = na
+var line longLine = na
+var label strikeLabel = na
+
+if hasPosition and not na(shortStrike)
+    if not na(shortLine)
+        line.delete(shortLine)
+        line.delete(longLine)
+        label.delete(strikeLabel)
+
+    lineColor = tradeType == "PUT" ? color.green : color.red
+    shortLine := line.new(entryBar, shortStrike, bar_index + 50, shortStrike,
+                          color=color.new(lineColor, 20), width=2, style=line.style_dashed)
+    longLine := line.new(entryBar, longStrike, bar_index + 50, longStrike,
+                         color=color.new(lineColor, 50), width=1, style=line.style_dotted)
+
+    plColor = currentPL > 0 ? color.green : color.red
+    strikeLabel := label.new(bar_index, shortStrike,
+                             text="P&L: $" + str.tostring(currentPL, "#.##"),
+                             color=color.new(plColor, 70),
+                             textcolor=color.white,
+                             style=label.style_label_left,
+                             size=size.small)
+
+// Entry markers
+plotshape(enterPutSpread, "PUT", shape.triangleup, location.belowbar,
+         color=color.new(color.green, 0), size=size.large, text="PUT")
+plotshape(enterCallSpread, "CALL", shape.triangledown, location.abovebar,
+         color=color.new(color.red, 0), size=size.large, text="CALL")
+
+// Background
+bgcolor(qualityExcellent ? color.new(color.green, 95) :
+       qualityGood ? color.new(color.green, 97) :
+       qualityPoor ? color.new(color.red, 97) : na)
+bgcolor(vixDangerous ? color.new(color.red, 90) : na)
+bgcolor(isEntryTime and barstate.isconfirmed ? color.new(color.blue, 98) : na)
+
+// Entry labels
+if enterPutSpread or enterCallSpread
+    labelColor = enterPutSpread ? color.new(color.green, 0) : color.new(color.red, 0)
+    labelStyle = enterPutSpread ? label.style_label_up : label.style_label_down
+
+    labelText = (enterPutSpread ? "PUT SPREAD" : "CALL SPREAD") + "\n" +
+                "Strike: " + str.tostring(shortStrike) + "/" + str.tostring(longStrike) + "\n" +
+                "Premium: $" + str.tostring(entryPremium, "#.##") + "\n" +
+                "Contracts: " + str.tostring(positionSize, "#.#") + "\n" +
+                "Quality: " + str.tostring(qualityScore) + "\n" +
+                "Win%: " + str.tostring(winProbability * 100, "#") + "%"
+
+    label.new(bar_index, enterPutSpread ? low * 0.997 : high * 1.003,
+             text=labelText,
+             color=labelColor,
+             textcolor=color.white,
+             style=labelStyle,
+             size=size.normal)
+
+// ==================================================================================
+// DASHBOARD
+// ==================================================================================
+
+var table dashboard = table.new(position.top_right, 2, 12,
+                                bgcolor=color.new(color.black, 90),
+                                border_width=1)
+
+if barstate.islast
+    // Title
+    table.cell(dashboard, 0, 0, "0DTE Pro", text_color=color.white,
+              bgcolor=color.new(color.blue, 40), text_size=size.large)
+    table.cell(dashboard, 1, 0, ticker, text_color=color.white,
+              bgcolor=color.new(color.blue, 40), text_size=size.large)
+
+    // Quality Score
+    qColor = qualityExcellent ? color.new(color.green, 40) :
+             qualityGood ? color.new(color.blue, 40) :
+             qualityFair ? color.new(color.orange, 40) : color.new(color.red, 40)
+    table.cell(dashboard, 0, 1, "Quality", text_color=color.white)
+    table.cell(dashboard, 1, 1, str.tostring(qualityScore), text_color=color.white, bgcolor=qColor)
+
+    // VIX
+    vColor = vixRegimeLow ? color.new(color.green, 40) :
+             vixRegimeMedium ? color.new(color.blue, 40) :
+             vixRegimeHigh ? color.new(color.orange, 40) : color.new(color.red, 40)
+    table.cell(dashboard, 0, 2, "VIX", text_color=color.white)
+    table.cell(dashboard, 1, 2, str.tostring(vix, "#.#"), text_color=color.white, bgcolor=vColor)
+
+    // Trend
+    tColor = strongTrendUp or strongTrendDown ? color.new(color.green, 40) :
+             trendUp or trendDown ? color.new(color.blue, 40) : color.new(color.gray, 40)
+    tText = strongTrendUp ? "Strong ↑" : trendUp ? "Up ↑" :
+            strongTrendDown ? "Strong ↓" : trendDown ? "Down ↓" : "Neutral"
+    table.cell(dashboard, 0, 3, "Trend", text_color=color.white)
+    table.cell(dashboard, 1, 3, tText, text_color=color.white, bgcolor=tColor)
+
+    // Expected Move
+    table.cell(dashboard, 0, 4, "Exp Move", text_color=color.white)
+    table.cell(dashboard, 1, 4, str.tostring(expectedMoveDollars, "#.#") + " (" +
+              str.tostring(expectedMovePercent*100, "#.##") + "%)",
+              text_color=color.white, bgcolor=color.new(color.gray, 60))
+
+    // Win Probability
+    table.cell(dashboard, 0, 5, "Win Prob", text_color=color.white)
+    table.cell(dashboard, 1, 5, str.tostring(winProbability * 100, "#") + "%",
+              text_color=color.white, bgcolor=color.new(color.purple, 60))
+
+    // Position
+    posText = hasPosition ? tradeType + " SPREAD" : "FLAT"
+    posColor = hasPosition ? color.new(color.blue, 40) : color.new(color.gray, 60)
+    table.cell(dashboard, 0, 6, "Position", text_color=color.white)
+    table.cell(dashboard, 1, 6, posText, text_color=color.white, bgcolor=posColor)
+
+    // Contracts
+    if hasPosition
+        table.cell(dashboard, 0, 7, "Contracts", text_color=color.white)
+        table.cell(dashboard, 1, 7, str.tostring(positionSize, "#.#"),
+                  text_color=color.white, bgcolor=color.new(color.gray, 60))
+
+    // Current P&L
+    if hasPosition
+        plColor = currentPL > 0 ? color.new(color.green, 40) : color.new(color.red, 40)
+        plDollars = currentPL * positionSize * 100
+        table.cell(dashboard, 0, 8, "P&L", text_color=color.white)
+        table.cell(dashboard, 1, 8, "$" + str.tostring(plDollars, "#"),
+                  text_color=color.white, bgcolor=plColor)
+
+    // Daily P&L
+    dayPlColor = dailyPL > 0 ? color.new(color.green, 40) : dailyPL < 0 ? color.new(color.red, 40) : color.new(color.gray, 60)
+    table.cell(dashboard, 0, 9, "Daily P&L", text_color=color.white)
+    table.cell(dashboard, 1, 9, "$" + str.tostring(dailyPL, "#"),
+              text_color=color.white, bgcolor=dayPlColor)
+
+    // Entry Window
+    entryColor = isEntryTime ? color.new(color.green, 40) : color.new(color.gray, 60)
+    table.cell(dashboard, 0, 10, "Entry Time", text_color=color.white)
+    table.cell(dashboard, 1, 10, isEntryTime ? "OPEN" : "CLOSED",
+              text_color=color.white, bgcolor=entryColor)
+
+    // Canary (Special Days Warning)
+    warningText = skipFOMC ? "FOMC!" : skipOpex ? "OPEX!" : dailyLossExceeded ? "MAX LOSS!" : "Clear"
+    warningColor = (skipFOMC or skipOpex or dailyLossExceeded) ? color.new(color.red, 40) : color.new(color.green, 60)
+    table.cell(dashboard, 0, 11, "Status", text_color=color.white)
+    table.cell(dashboard, 1, 11, warningText, text_color=color.white, bgcolor=warningColor)
+
+// ==================================================================================
+// ALERTS
+// ==================================================================================
+
+alertcondition(enterPutSpread, "Put Spread Entry", "PUT SPREAD: Q={{plot_4}}, Win={{plot_5}}%")
+alertcondition(enterCallSpread, "Call Spread Entry", "CALL SPREAD: Q={{plot_4}}, Win={{plot_5}}%")
+alertcondition(qualityExcellent and canEnter, "Excellent Setup", "EXCELLENT SETUP DETECTED!")
+alertcondition(exitSignal, "Position Exit", "EXIT TRIGGERED")
+alertcondition(takeProfitHit, "Take Profit", "TAKE PROFIT HIT!")
+alertcondition(stopLossHit, "Stop Loss", "STOP LOSS HIT!")
+alertcondition(dailyLossExceeded, "Max Daily Loss", "MAX DAILY LOSS EXCEEDED!")

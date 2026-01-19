@@ -1,0 +1,404 @@
+//@version=6
+strategy("0 DTE Credit Spread Strategy - Refined",
+         shorttitle="0DTE CS",
+         overlay=true,
+         initial_capital=25000,
+         default_qty_type=strategy.cash,
+         default_qty_value=1000,
+         commission_type=strategy.commission.cash_per_contract,
+         commission_value=0.65,
+         slippage=0,
+         pyramiding=1,
+         calc_on_every_tick=false,
+         calc_on_order_fills=false,
+         process_orders_on_close=true)
+
+// ==================================================================================
+// 0 DTE CREDIT SPREAD STRATEGY - VIX1D BASED
+// ==================================================================================
+// Based on VIX1D expected move with refined entry/exit rules
+// Trades: SPX, SPY, QQQ 0DTE options at market open
+// Strategy: Sell credit spreads outside expected move range
+// ==================================================================================
+
+// ==================================================================================
+// INPUTS
+// ==================================================================================
+
+// Strategy Parameters
+string ticker = input.string("SPX", "Underlying Ticker", options=["SPX", "SPY", "QQQ"], group="Strategy")
+float alphaMultiplier = input.float(0.50, "Alpha (Expected Move Multiplier)", minval=0.3, maxval=0.8, step=0.05, group="Strategy")
+int spreadWidth = input.int(5, "Spread Width ($)", minval=3, maxval=15, step=1, group="Strategy")
+float premiumTarget = input.float(1.0, "Target Premium ($)", minval=0.5, maxval=3.0, step=0.1, group="Strategy")
+
+// Time Settings (SGT = UTC+8)
+int entryHour = input.int(9, "Entry Hour (local)", minval=0, maxval=23, group="Time")
+int entryMinute = input.int(45, "Entry Minute", minval=0, maxval=59, group="Time")
+int exitHour = input.int(16, "Exit Hour (local)", minval=0, maxval=23, group="Time")
+int exitMinute = input.int(0, "Exit Minute", minval=0, maxval=59, group="Time")
+
+// Trend Filter
+int smaPeriod1 = input.int(20, "Fast SMA Period", minval=10, maxval=50, group="Trend")
+int smaPeriod2 = input.int(60, "Slow SMA Period", minval=30, maxval=100, group="Trend")
+bool requireTrendConfirm = input.bool(true, "Require Strong Trend", group="Trend")
+
+// VIX Filter
+float maxVIX = input.float(25.0, "Maximum VIX Level", minval=15, maxval=50, group="Risk")
+float minVIX = input.float(8.0, "Minimum VIX Level", minval=5, maxval=15, group="Risk")
+
+// Risk Management
+float stopLossMultiplier = input.float(2.5, "Stop Loss (x Premium)", minval=1.5, maxval=5.0, step=0.5, group="Risk")
+bool useTrailingStop = input.bool(true, "Use Trailing Stop", group="Risk")
+float trailPercent = input.float(40, "Trail Profit %", minval=20, maxval=80, step=10, group="Risk")
+
+// Position Sizing
+bool useVolBasedSize = input.bool(true, "Volatility-Based Position Sizing", group="Position")
+float baseSize = input.float(1, "Base Position Size (contracts)", minval=0.5, maxval=10, step=0.5, group="Position")
+float highVolReduction = input.float(0.5, "High Vol Size Reduction", minval=0.3, maxval=0.8, step=0.1, group="Position")
+
+// ==================================================================================
+// INDICATORS & CALCULATIONS
+// ==================================================================================
+
+// Moving Averages
+sma20 = ta.sma(close, smaPeriod1)
+sma60 = ta.sma(close, smaPeriod2)
+ema9 = ta.ema(close, 9)
+ema21 = ta.ema(close, 21)
+
+// VIX (Using symbol's implied volatility or requesting VIX)
+// Note: For backtesting, we'll use VIX or VIX1D if available
+vixTicker = ticker == "SPX" or ticker == "SPY" ? "VIX" : "VXN"
+vix = request.security(vixTicker, timeframe.period, close, lookahead=barmerge.lookahead_off)
+
+// VIX1D approximation (if not available, use VIX/1.5 as proxy)
+vix1d = vix / 1.5  // Approximation: VIX1D typically 60-70% of VIX
+
+// Expected Move Calculation
+// Formula: (VIX1D / sqrt(252)) * alpha * Price / 100
+expectedMovePercent = (vix1d / math.sqrt(252)) * alphaMultiplier / 100
+expectedMove = close * expectedMovePercent
+
+// Price Bands
+lowerBand = close - expectedMove
+upperBand = close + expectedMove
+
+// ATR for volatility reference
+atr14 = ta.atr(14)
+
+// ==================================================================================
+// MARKET CONDITIONS
+// ==================================================================================
+
+// Trend Determination
+trendUp = sma20 >= sma60
+trendDown = sma20 < sma60
+strongTrendUp = sma20 > sma60 and close > sma20 and sma20 > sma20[5]
+strongTrendDown = sma20 < sma60 and close < sma20 and sma20 < sma20[5]
+
+// VIX Filters
+vixInRange = vix >= minVIX and vix <= maxVIX
+vixRising = vix > vix[1]
+vixFalling = vix < vix[1]
+vixCalm = vix < 20
+vixElevated = vix > 20 and vix < 30
+vixHigh = vix >= 30
+
+// Volume Analysis
+volMA = ta.sma(volume, 20)
+highVolume = volume > volMA * 1.2
+lowVolume = volume < volMA * 0.8
+
+// Price Action
+bullishCandle = close > open
+bearishCandle = close < open
+bigMove = math.abs(close - open) / open > 0.005
+
+// Market Quality Score (0-100)
+qualityScore = 0
+qualityScore := qualityScore + (vixInRange ? 30 : 0)
+qualityScore := qualityScore + (vixCalm ? 20 : vixElevated ? 10 : 0)
+qualityScore := qualityScore + ((strongTrendUp or strongTrendDown) ? 30 : (trendUp or trendDown) ? 15 : 0)
+qualityScore := qualityScore + (not bigMove ? 20 : 0)
+
+// ==================================================================================
+// TIME FILTERS
+// ==================================================================================
+
+// Check if we're at entry time
+isEntryTime = (hour == entryHour and minute >= entryMinute) or (hour == entryHour + 1 and minute < entryMinute)
+isExitTime = (hour >= exitHour and minute >= exitMinute) or hour > exitHour
+
+// Only trade on certain days (avoid Mondays for less volatility)
+validDay = dayofweek != dayofweek.monday or not requireTrendConfirm
+
+// ==================================================================================
+// CREDIT SPREAD SETUP
+// ==================================================================================
+
+// Position sizing based on volatility
+positionSize = baseSize
+if useVolBasedSize
+    if vixHigh
+        positionSize := baseSize * highVolReduction
+    else if vixElevated
+        positionSize := baseSize * 0.75
+
+// Premium Estimation (simplified model)
+// Premium increases with: higher VIX, closer strikes, more DTE
+// For 0DTE at open, premium ~ 0.15-0.25% of strike price for 1 SD move
+premiumEstimate = close * expectedMovePercent * 0.20  // ~20% of expected move as premium
+premiumEstimate := math.max(premiumEstimate, premiumTarget * 0.5)  // Minimum premium
+
+// Max Loss calculation
+maxLoss = spreadWidth - premiumEstimate
+riskRewardRatio = premiumEstimate / maxLoss
+
+// ==================================================================================
+// ENTRY LOGIC
+// ==================================================================================
+
+// Trade Selection
+var string tradeType = ""
+var float shortStrike = na
+var float longStrike = na
+var float entryPremium = na
+var float entryPrice = na
+var int entryBar = na
+
+// Entry Conditions
+validMarketConditions = vixInRange and qualityScore >= 50 and validDay
+canEnter = strategy.position_size == 0 and isEntryTime and validMarketConditions
+
+// Put Credit Spread Setup (trending up)
+putCreditSetup = trendUp and (not requireTrendConfirm or strongTrendUp)
+putCreditSetup := putCreditSetup and (vixCalm or (vixElevated and not vixRising))
+
+// Call Credit Spread Setup (trending down)
+callCreditSetup = trendDown and (not requireTrendConfirm or strongTrendDown)
+callCreditSetup := callCreditSetup and (vixCalm or (vixElevated and not vixRising))
+
+// Entry Signals
+enterPutSpread = canEnter and putCreditSetup
+enterCallSpread = canEnter and callCreditSetup
+
+// Execute Entry
+if enterPutSpread
+    tradeType := "PUT"
+    shortStrike := math.round(lowerBand)
+    longStrike := shortStrike - spreadWidth
+    entryPremium := premiumEstimate
+    entryPrice := close
+    entryBar := bar_index
+
+    // Enter position (simulate selling put spread)
+    strategy.entry("Put Credit Spread", strategy.long, qty=positionSize,
+                   comment="PCS-" + str.tostring(qualityScore))
+
+if enterCallSpread
+    tradeType := "CALL"
+    shortStrike := math.round(upperBand)
+    longStrike := shortStrike + spreadWidth
+    entryPremium := premiumEstimate
+    entryPrice := close
+    entryBar := bar_index
+
+    // Enter position (simulate selling call spread)
+    strategy.entry("Call Credit Spread", strategy.long, qty=positionSize,
+                   comment="CCS-" + str.tostring(qualityScore))
+
+// ==================================================================================
+// EXIT LOGIC
+// ==================================================================================
+
+hasPosition = strategy.position_size != 0
+
+// P&L Tracking (simplified)
+var float currentPL = 0.0
+var float maxProfit = 0.0
+
+if hasPosition and not na(entryPremium) and not na(shortStrike)
+
+    // For PUT Credit Spread
+    if tradeType == "PUT"
+        // Win if price stays above short strike
+        if close > shortStrike
+            currentPL := entryPremium  // Max profit
+        else
+            // Loss increases as price drops below short strike
+            intrinsicValue = math.max(0, shortStrike - close)
+            spreadValue = intrinsicValue - math.max(0, longStrike - close)
+            currentPL := entryPremium - spreadValue
+
+    // For CALL Credit Spread
+    if tradeType == "CALL"
+        // Win if price stays below short strike
+        if close < shortStrike
+            currentPL := entryPremium  // Max profit
+        else
+            // Loss increases as price rises above short strike
+            intrinsicValue = math.max(0, close - shortStrike)
+            spreadValue = intrinsicValue - math.max(0, close - longStrike)
+            currentPL := entryPremium - spreadValue
+
+    maxProfit := math.max(maxProfit, currentPL)
+
+// Exit Conditions
+
+// 1. Time-based exit (EOD)
+exitEOD = isExitTime
+
+// 2. Stop Loss (losing more than X times premium)
+stopLossHit = currentPL < -(entryPremium * stopLossMultiplier)
+
+// 3. Take Profit (reached 80% of max profit)
+takeProfitHit = currentPL >= (entryPremium * 0.80)
+
+// 4. Trailing Stop (give back X% of max profit)
+trailingStopHit = useTrailingStop and maxProfit > 0 and currentPL < (maxProfit * (1 - trailPercent/100))
+
+// 5. Delta breach (price crosses short strike significantly)
+deltaBreach = false
+if tradeType == "PUT"
+    deltaBreach := close < (shortStrike * 0.995)  // 0.5% below short strike
+else if tradeType == "CALL"
+    deltaBreach := close > (shortStrike * 1.005)  // 0.5% above short strike
+
+// 6. Volatility spike (VIX jumps significantly)
+volSpike = vix > vix[1] * 1.15 and vixHigh
+
+// Combined exit signal
+exitSignal = hasPosition and (exitEOD or stopLossHit or takeProfitHit or trailingStopHit or deltaBreach or volSpike)
+
+// Execute Exit
+if exitSignal
+    exitReason = exitEOD ? "EOD" : stopLossHit ? "SL" : takeProfitHit ? "TP" : trailingStopHit ? "Trail" : deltaBreach ? "Breach" : "VolSpike"
+    strategy.close_all(comment=exitReason + "-P&L:" + str.tostring(math.round(currentPL * 100)))
+
+    // Reset variables
+    tradeType := ""
+    shortStrike := na
+    longStrike := na
+    entryPremium := na
+    currentPL := 0.0
+    maxProfit := 0.0
+
+// ==================================================================================
+// VISUALIZATION
+// ==================================================================================
+
+// Price Bands
+plot(upperBand, "Upper Band", color=color.new(color.red, 50), linewidth=2, style=plot.style_stepline)
+plot(lowerBand, "Lower Band", color=color.new(color.green, 50), linewidth=2, style=plot.style_stepline)
+
+// SMAs
+plot(sma20, "SMA 20", color=color.new(color.blue, 0), linewidth=2)
+plot(sma60, "SMA 60", color=color.new(color.orange, 0), linewidth=2)
+
+// Expected Move Visualization
+fill(plot(upperBand), plot(lowerBand), color=color.new(color.gray, 90), title="Expected Move Zone")
+
+// Short Strike Lines
+var line shortStrikeLine = na
+var line longStrikeLine = na
+
+if not na(shortStrike) and hasPosition
+    if not na(shortStrikeLine)
+        line.delete(shortStrikeLine)
+    if not na(longStrikeLine)
+        line.delete(longStrikeLine)
+
+    lineColor = tradeType == "PUT" ? color.new(color.green, 30) : color.new(color.red, 30)
+    shortStrikeLine := line.new(entryBar, shortStrike, bar_index + 50, shortStrike,
+                                color=lineColor, width=2, style=line.style_dashed)
+    longStrikeLine := line.new(entryBar, longStrike, bar_index + 50, longStrike,
+                               color=lineColor, width=1, style=line.style_dotted)
+
+// Entry Signals
+plotshape(enterPutSpread, "Put Credit Spread", shape.triangleup, location.belowbar,
+         color=color.new(color.green, 0), size=size.normal, text="PCS")
+plotshape(enterCallSpread, "Call Credit Spread", shape.triangledown, location.abovebar,
+         color=color.new(color.red, 0), size=size.normal, text="CCS")
+
+// Background Colors
+bgcolor(vixHigh ? color.new(color.red, 90) : na, title="High VIX")
+bgcolor(qualityScore >= 70 ? color.new(color.green, 95) : na, title="High Quality Setup")
+bgcolor(isEntryTime and barstate.isconfirmed ? color.new(color.blue, 97) : na, title="Entry Window")
+
+// Entry Labels
+if enterPutSpread or enterCallSpread
+    tradeLabel = enterPutSpread ? "PUT SPREAD" : "CALL SPREAD"
+    labelText = tradeLabel + "\nShort: " + str.tostring(shortStrike) +
+                "\nPremium: $" + str.tostring(entryPremium, "#.##") +
+                "\nQuality: " + str.tostring(qualityScore) +
+                "\nVIX: " + str.tostring(vix, "#.#")
+
+    label.new(bar_index, enterPutSpread ? low : high,
+             text=labelText,
+             color=enterPutSpread ? color.new(color.green, 10) : color.new(color.red, 10),
+             textcolor=color.white,
+             style=enterPutSpread ? label.style_label_up : label.style_label_down,
+             size=size.normal)
+
+// ==================================================================================
+// STATISTICS TABLE
+// ==================================================================================
+
+var table statsTable = table.new(position.top_right, 2, 8,
+                                 bgcolor=color.new(color.black, 85),
+                                 border_width=1)
+
+if barstate.islast
+    // Header
+    table.cell(statsTable, 0, 0, "0DTE Strategy", text_color=color.white,
+              bgcolor=color.new(color.blue, 50), text_size=size.normal)
+    table.cell(statsTable, 1, 0, "Status", text_color=color.white,
+              bgcolor=color.new(color.blue, 50), text_size=size.normal)
+
+    // Trend
+    trendText = strongTrendUp ? "↑ Strong Up" : trendUp ? "↑ Up" : strongTrendDown ? "↓ Strong Down" : trendDown ? "↓ Down" : "→ Neutral"
+    trendColor = trendUp ? color.new(color.green, 50) : trendDown ? color.new(color.red, 50) : color.new(color.gray, 50)
+    table.cell(statsTable, 0, 1, "Trend", text_color=color.white)
+    table.cell(statsTable, 1, 1, trendText, text_color=color.white, bgcolor=trendColor)
+
+    // VIX
+    vixColor = vixCalm ? color.new(color.green, 50) : vixElevated ? color.new(color.orange, 50) : color.new(color.red, 50)
+    table.cell(statsTable, 0, 2, "VIX", text_color=color.white)
+    table.cell(statsTable, 1, 2, str.tostring(vix, "#.#"), text_color=color.white, bgcolor=vixColor)
+
+    // Expected Move
+    table.cell(statsTable, 0, 3, "Exp Move", text_color=color.white)
+    table.cell(statsTable, 1, 3, str.tostring(expectedMove, "#.#") + " (" + str.tostring(expectedMovePercent*100, "#.##") + "%)",
+              text_color=color.white, bgcolor=color.new(color.gray, 70))
+
+    // Quality Score
+    qualityColor = qualityScore >= 70 ? color.new(color.green, 50) : qualityScore >= 50 ? color.new(color.orange, 50) : color.new(color.red, 50)
+    table.cell(statsTable, 0, 4, "Quality", text_color=color.white)
+    table.cell(statsTable, 1, 4, str.tostring(qualityScore), text_color=color.white, bgcolor=qualityColor)
+
+    // Position
+    posText = hasPosition ? (tradeType + " SPREAD") : "None"
+    posColor = hasPosition ? color.new(color.blue, 50) : color.new(color.gray, 70)
+    table.cell(statsTable, 0, 5, "Position", text_color=color.white)
+    table.cell(statsTable, 1, 5, posText, text_color=color.white, bgcolor=posColor)
+
+    // P&L
+    if hasPosition
+        plColor = currentPL > 0 ? color.new(color.green, 50) : color.new(color.red, 50)
+        table.cell(statsTable, 0, 6, "Current P&L", text_color=color.white)
+        table.cell(statsTable, 1, 6, "$" + str.tostring(currentPL, "#.##"), text_color=color.white, bgcolor=plColor)
+
+    // Entry Window
+    entryColor = isEntryTime ? color.new(color.green, 50) : color.new(color.gray, 70)
+    table.cell(statsTable, 0, 7, "Entry Time", text_color=color.white)
+    table.cell(statsTable, 1, 7, isEntryTime ? "✓ OPEN" : "✗ Closed", text_color=color.white, bgcolor=entryColor)
+
+// ==================================================================================
+// ALERTS
+// ==================================================================================
+
+alertcondition(enterPutSpread, "Put Credit Spread Entry", "PUT SPREAD: Quality {{plot_4}}, VIX {{plot_2}}")
+alertcondition(enterCallSpread, "Call Credit Spread Entry", "CALL SPREAD: Quality {{plot_4}}, VIX {{plot_2}}")
+alertcondition(exitSignal, "Position Exit", "EXIT: Position closed")
+alertcondition(qualityScore >= 80, "High Quality Setup", "High Quality Setup Detected!")
+alertcondition(vixHigh, "VIX Spike", "VIX above 30!")
