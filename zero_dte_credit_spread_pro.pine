@@ -504,9 +504,7 @@ exitSignal = hasPosition and (takeProfitHit or stopLossHit or timeExit or earlyT
 
 // Execute exit
 if exitSignal
-    exitReason = takeProfitHit ? "TP" : stopLossHit ? "SL" : timeExit ? "EOD" :
-                 earlyTPExit ? "EarlyTP" : deltaBreached ? "Delta" :
-                 breakevenStopHit ? "BE" : vixSpike ? "VixSpike" : "TrendRev"
+    exitReason = takeProfitHit ? "TP" : stopLossHit ? "SL" : timeExit ? "EOD" : earlyTPExit ? "EarlyTP" : deltaBreached ? "Delta" : breakevenStopHit ? "BE" : vixSpike ? "VixSpike" : "TrendRev"
 
     plDollars = currentPL * positionSize * 100
     dailyPL += plDollars
@@ -569,9 +567,7 @@ plotshape(enterCallSpread, "CALL", shape.triangledown, location.abovebar,
          color=color.new(color.red, 0), size=size.large, text="CALL")
 
 // Background
-bgcolor(qualityExcellent ? color.new(color.green, 95) :
-       qualityGood ? color.new(color.green, 97) :
-       qualityPoor ? color.new(color.red, 97) : na)
+bgcolor(qualityExcellent ? color.new(color.green, 95) : qualityGood ? color.new(color.green, 97) : qualityPoor ? color.new(color.red, 97) : na)
 bgcolor(vixDangerous ? color.new(color.red, 90) : na)
 bgcolor(isEntryTime and barstate.isconfirmed ? color.new(color.blue, 98) : na)
 
@@ -605,24 +601,18 @@ if barstate.islast
               bgcolor=color.new(color.blue, 40), text_size=size.large)
 
     // Quality Score
-    qColor = qualityExcellent ? color.new(color.green, 40) :
-             qualityGood ? color.new(color.blue, 40) :
-             qualityFair ? color.new(color.orange, 40) : color.new(color.red, 40)
+    qColor = qualityExcellent ? color.new(color.green, 40) : qualityGood ? color.new(color.blue, 40) : qualityFair ? color.new(color.orange, 40) : color.new(color.red, 40)
     table.cell(dashboard, 0, 1, "Quality", text_color=color.white)
     table.cell(dashboard, 1, 1, str.tostring(qualityScore), text_color=color.white, bgcolor=qColor)
 
     // VIX
-    vColor = vixRegimeLow ? color.new(color.green, 40) :
-             vixRegimeMedium ? color.new(color.blue, 40) :
-             vixRegimeHigh ? color.new(color.orange, 40) : color.new(color.red, 40)
+    vColor = vixRegimeLow ? color.new(color.green, 40) : vixRegimeMedium ? color.new(color.blue, 40) : vixRegimeHigh ? color.new(color.orange, 40) : color.new(color.red, 40)
     table.cell(dashboard, 0, 2, "VIX", text_color=color.white)
     table.cell(dashboard, 1, 2, str.tostring(vix, "#.#"), text_color=color.white, bgcolor=vColor)
 
     // Trend
-    tColor = strongTrendUp or strongTrendDown ? color.new(color.green, 40) :
-             trendUp or trendDown ? color.new(color.blue, 40) : color.new(color.gray, 40)
-    tText = strongTrendUp ? "Strong ↑" : trendUp ? "Up ↑" :
-            strongTrendDown ? "Strong ↓" : trendDown ? "Down ↓" : "Neutral"
+    tColor = strongTrendUp or strongTrendDown ? color.new(color.green, 40) : trendUp or trendDown ? color.new(color.blue, 40) : color.new(color.gray, 40)
+    tText = strongTrendUp ? "Strong Up" : trendUp ? "Up" : strongTrendDown ? "Strong Down" : trendDown ? "Down" : "Neutral"
     table.cell(dashboard, 0, 3, "Trend", text_color=color.white)
     table.cell(dashboard, 1, 3, tText, text_color=color.white, bgcolor=tColor)
 
